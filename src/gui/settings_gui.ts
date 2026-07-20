@@ -4,12 +4,13 @@ import type { IdmParams } from '../sim/idm';
 export interface TrafficSettings {
   timeScale: number;
   carLength: number;
+  light: { green: number; red: number };
   cars: [IdmParams, IdmParams];
 }
 
 export interface GuiState {
   settings: TrafficSettings;
-  telemetry: { carA: string; carB: string };
+  telemetry: { carA: string; carB: string; light: string };
 }
 
 /** Creates the settings panel and returns its live values. */
@@ -18,17 +19,22 @@ export function setupGui(): GuiState {
     settings: {
       timeScale: 1,
       carLength: 4.5,
+      light: { green: 10, red: 8 },
       cars: [
         { v0: 30, T: 1.5, a: 2.0, b: 2.5, s0: 2, delta: 4 },
         { v0: 12, T: 1.5, a: 1.2, b: 2.0, s0: 2, delta: 4 },
       ],
     },
-    telemetry: { carA: '', carB: '' },
+    telemetry: { carA: '', carB: '', light: '' },
   };
 
   const gui = new GUI({ title: 'Traffic' });
   gui.add(state.settings, 'timeScale', 0.1, 3, 0.1).name('Time scale');
   gui.add(state.settings, 'carLength', 3, 8, 0.5).name('Vehicle length (m)');
+
+  const lightFolder = gui.addFolder('Traffic light');
+  lightFolder.add(state.settings.light, 'green', 2, 60, 1).name('Green (s)');
+  lightFolder.add(state.settings.light, 'red', 2, 60, 1).name('Red (s)');
 
   const names = ['Car A (red)', 'Car B (blue)'];
   state.settings.cars.forEach((car, i) => {
@@ -43,5 +49,6 @@ export function setupGui(): GuiState {
 
   gui.add(state.telemetry, 'carA').name('A speed').listen();
   gui.add(state.telemetry, 'carB').name('B speed').listen();
+  gui.add(state.telemetry, 'light').name('Light').listen();
   return state;
 }

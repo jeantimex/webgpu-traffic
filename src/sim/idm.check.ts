@@ -33,4 +33,16 @@ for (let step = 0; step < 120 * 60; step++) {
 assert(minGap > 0, `no collision (min gap ${minGap.toFixed(2)} m)`);
 assert(Math.abs(cars[0].v - slow.v0) < 0.2, `fast car settles to leader speed (v=${cars[0].v.toFixed(2)})`);
 
+// Red light: a car must stop just before the stop line, then accelerate away once it turns green.
+const lone: Car[] = [{ s: 0, v: 20, a: 0 }];
+const redLight = [{ s: C / 4 }];
+for (let step = 0; step < 60 * 60; step++) stepRing(lone, [fast], C, CAR_LENGTH, 1 / 60, redLight);
+const distToLine = (((C / 4 - lone[0].s) % C) + C) % C;
+assert(lone[0].v < 0.01, `stopped at the red light (v=${lone[0].v.toFixed(3)})`);
+assert(
+  distToLine > CAR_LENGTH / 2 && distToLine < 8,
+  `stopped just before the line (${distToLine.toFixed(2)} m from center)`);
+for (let step = 0; step < 10 * 60; step++) stepRing(lone, [fast], C, CAR_LENGTH, 1 / 60);
+assert(lone[0].v > 10, `accelerates on green (v=${lone[0].v.toFixed(1)})`);
+
 console.log(`IDM checks passed (min gap ${minGap.toFixed(2)} m, settled at ${cars[0].v.toFixed(2)} m/s)`);

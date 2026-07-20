@@ -33,9 +33,15 @@ export function idmAcceleration(
   return p.a * (1 - (v / p.v0) ** p.delta - (sStar / s) ** 2);
 }
 
+/** A virtual standing vehicle on the ring, e.g. the stop line of a red light. */
+export interface Obstacle {
+  s: number; // arc position (m)
+}
+
 /**
  * Advances every car on the ring by one fixed step (semi-implicit Euler).
- * Each car follows the nearest car ahead of it on the ring.
+ * Each car follows the nearest car ahead of it and brakes for any obstacles,
+ * whichever constraint is strongest.
  */
 export function stepRing(
   cars: Car[],
@@ -43,9 +49,11 @@ export function stepRing(
   circumference: number,
   carLength: number,
   dt: number,
+  obstacles: Obstacle[] = [],
 ): void {
   // ponytail: O(n²) leader search, trivial for a handful of cars; sort by arc position if the car count grows large.
   const accels = cars.map((car, i) => {
+    let accel = idmAcceleration(car.v, 1e6, 0, params[i]); // free road
     let gap = Infinity;
     let vLeader = 0;
     for (let j = 0; j < cars.length; j++) {
@@ -56,8 +64,15 @@ export function stepRing(
         vLeader = cars[j].v;
       }
     }
-    if (!Number.isFinite(gap)) gap = 1e6; // alone on the ring: free road
-    return idmAcceleration(car.v, gap - carLength, car.v - vLeader, params[i]);
+    if (Number.isFinite(gap)) {
+      accel = Math.min(accel, idmAcceleration(car.v, gap - carLength, car.v - vLeader, params[i]));
+    }
+    for (const obstacle of obstacles) {
+      const d = (((obstacle.s - car.s) % circumference) + circumference) % circumference;
+      // The car's front bumper stops at the obstacle: subtract its own half length.
+      accel = Math.min(accel, idmAcceleration(car.v, d - carLength / 2, car.v, params[i]));
+    }
+    return accel;
   });
 
   for (let i = 0; i < cars.length; i++) {
