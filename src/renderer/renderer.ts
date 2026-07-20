@@ -49,8 +49,8 @@ const trafficShader = /* wgsl */ `
 const TRACK_RADIUS = 40;
 const ROAD_HALF_WIDTH = 4;
 const CIRCUMFERENCE = 2 * Math.PI * TRACK_RADIUS;
-/** Lane center radii: lane 0 = inner, lane 1 = outer (two 4 m lanes share the road). */
-const LANE_RADIUS = [TRACK_RADIUS - 2, TRACK_RADIUS + 2];
+/** Initial logical lanes: red/blue inner, yellow/white outer. Cars change lanes on their own. */
+const START_LANES = [0, 0, 1, 1];
 const SIM_STEP = 1 / 60;
 /** Byte stride between per-draw uniform slots (WebGPU dynamic-offset alignment). */
 const DRAW_STRIDE = 256;
@@ -392,7 +392,12 @@ export class Renderer {
       s: START_S[i % START_S.length],
       v: params.v0,
       a: 0,
-      lane: this.gui.settings.carLanes[i].lane,
+      lane: START_LANES[i % START_LANES.length],
+      lateral: START_LANES[i % START_LANES.length],
+      lateralVel: 0,
+      laneFrom: START_LANES[i % START_LANES.length],
+      laneProgress: 1,
+      cooldown: 0,
     }));
     this.builtCarLength = this.gui.settings.carLength;
     this.builtDayMode = this.gui.settings.dayMode;
@@ -461,9 +466,6 @@ export class Renderer {
     this.lastTime = now;
     const { green, yellow, red } = this.gui.settings.light;
     this.accumulator = Math.min(this.accumulator + dt * this.gui.settings.timeScale, 1);
-    this.cars.forEach((car, i) => {
-      car.lane = this.gui.settings.carLanes[i].lane;
-    });
     while (this.accumulator >= SIM_STEP) {
       this.lightClock += SIM_STEP;
       // Yellow brakes like red: stop if you can.
@@ -523,7 +525,12 @@ export class Renderer {
     drawData.set([1, 1, 1, 1], 16);
     this.cars.forEach((car, i) => {
       const theta = car.s / TRACK_RADIUS;
-      const r = LANE_RADIUS[car.lane];
+      // Lane centers are 2 m either side of the track radius; lateral eases between them.
+      const r = TRACK_RADIUS - 2 + 4 * car.lateral;
+      // While sliding sideways, yaw the body along the actual velocity direction.
+      // lateralVel is cosine-eased by the sim, so the yaw eases in and out too.
+      const lateralSpeed = 4 * car.lateralVel; // m/s (lane centers are 4 m apart)
+      const yaw = Math.atan2(lateralSpeed, Math.max(car.v, 1));
       const offset = FLOATS_PER_DRAW * (i + 1);
       drawData.set(
         multiply(
@@ -531,7 +538,7 @@ export class Renderer {
             r * Math.cos(theta),
             0.02 + roadHeight(car.s),
             r * Math.sin(theta),
-            -theta - Math.PI / 2,
+            -theta - Math.PI / 2 + yaw,
           ),
           rotationZ(Math.atan(roadGrade(car.s))),
         ),

@@ -1,5 +1,5 @@
 /**
- * Intelligent Driver Model (IDM) on a circular single-lane track.
+ * Intelligent Driver Model (IDM) on a circular two-lane track.
  * https://en.wikipedia.org/wiki/Intelligent_driver_model
  */
 
@@ -17,7 +17,12 @@ export interface Car {
   s: number; // arc position along the ring (m), in [0, circumference)
   v: number; // current speed (m/s)
   a: number; // last computed acceleration (m/s²)
-  lane: number; // 0 = inner, 1 = outer
+  lane: number; // logical lane: 0 = inner, 1 = outer
+  lateral: number; // visual lane position in lane units (0 = inner, 1 = outer), eases toward `lane`
+  lateralVel: number; // lateral velocity (lane units/s) during a lane change, 0 otherwise
+  laneFrom: number; // lateral position where the current lane change started
+  laneProgress: number; // lane-change progress in [0, 1]; 1 = settled in lane
+  cooldown: number; // seconds before this car may change lanes again
 }
 
 const MIN_GAP = 0.1; // floor for the gap so the interaction term cannot divide by zero
@@ -39,10 +44,82 @@ export interface Obstacle {
   s: number; // arc position (m)
 }
 
+// Lane-change tuning (MOBIL-lite).
+const LANE_CHANGE_TIME = 2; // s for the lateral slide
+const LANE_CHANGE_COOLDOWN = 4; // s between one car's lane changes (prevents weaving)
+const B_SAFE = 4; // m/s², the most braking a lane change may impose on anyone
+const DELTA_A = 0.2; // m/s², minimum advantage that makes a change worthwhile
+const KEEP_RIGHT_GAP = 60; // m, "inner lane is free ahead" threshold for drifting back
+
+interface LaneNeighbor {
+  index: number;
+  gap: number; // bumper-to-lead-position distance (m)
+  v: number;
+}
+
+/** Nearest car in `lane` ahead of (or behind) car `me`, measured along the ring. */
+function nearestInLane(
+  cars: Car[],
+  me: number,
+  lane: number,
+  circumference: number,
+  ahead: boolean,
+): LaneNeighbor | null {
+  let best: LaneNeighbor | null = null;
+  for (let j = 0; j < cars.length; j++) {
+    if (j === me || cars[j].lane !== lane) continue;
+    const d = (((cars[j].s - cars[me].s) % circumference) + circumference) % circumference;
+    const gap = ahead ? d : (circumference - d) % circumference;
+    if (best === null || gap < best.gap) best = { index: j, gap, v: cars[j].v };
+  }
+  return best;
+}
+
+function accelToward(car: Car, leader: LaneNeighbor | null, carLength: number, p: IdmParams): number {
+  return leader
+    ? idmAcceleration(car.v, leader.gap - carLength, car.v - leader.v, p)
+    : idmAcceleration(car.v, 1e6, 0, p);
+}
+
+/**
+ * MOBIL-lite: a car changes lanes when the target lane is clearly better (overtake /
+ * avoid a braking leader) — but only if neither it nor the target-lane follower has
+ * to brake harder than B_SAFE. Cars also drift back to the inner lane when it's free
+ * ahead. Obstacles (the red light) never trigger lane changes.
+ */
+function updateLanes(cars: Car[], params: IdmParams[], circumference: number, carLength: number): void {
+  for (let i = 0; i < cars.length; i++) {
+    const car = cars[i];
+    if (car.cooldown > 0) continue;
+    const target = 1 - car.lane;
+    const accelHere = accelToward(car, nearestInLane(cars, i, car.lane, circumference, true), carLength, params[i]);
+    const accelThere = accelToward(car, nearestInLane(cars, i, target, circumference, true), carLength, params[i]);
+    const keepRight = target === 0 && accelThere >= accelHere - DELTA_A &&
+      (nearestInLane(cars, i, 0, circumference, true)?.gap ?? Infinity) > KEEP_RIGHT_GAP;
+    if (accelThere - accelHere < DELTA_A && !keepRight) continue;
+    // Safety first: no hard braking for me or for the car behind me in the target lane.
+    if (accelThere < -B_SAFE) continue;
+    const follower = nearestInLane(cars, i, target, circumference, false);
+    if (follower) {
+      const followerAccel = idmAcceleration(
+        follower.v,
+        follower.gap - carLength,
+        follower.v - car.v,
+        params[follower.index],
+      );
+      if (followerAccel < -B_SAFE) continue;
+    }
+    car.lane = target;
+    car.cooldown = LANE_CHANGE_COOLDOWN;
+    car.laneFrom = car.lateral;
+    car.laneProgress = 0;
+  }
+}
+
 /**
  * Advances every car on the ring by one fixed step (semi-implicit Euler).
- * Each car follows the nearest car ahead of it and brakes for any obstacles,
- * whichever constraint is strongest.
+ * Each car follows the nearest car ahead of it in its lane and brakes for any
+ * obstacles, whichever constraint is strongest. Includes MOBIL-lite lane changes.
  */
 export function stepRing(
   cars: Car[],
@@ -76,10 +153,25 @@ export function stepRing(
     return accel;
   });
 
+  updateLanes(cars, params, circumference, carLength);
+
   for (let i = 0; i < cars.length; i++) {
     const car = cars[i];
     car.a = accels[i];
     car.v = Math.max(0, car.v + car.a * dt);
     car.s = (car.s + car.v * dt) % circumference;
+    car.cooldown = Math.max(0, car.cooldown - dt);
+    // Cosine-eased lateral slide: zero lateral velocity at both ends, so the car's
+    // path is an S-curve that joins the target lane without a heading jerk.
+    if (car.laneProgress < 1) {
+      car.laneProgress = Math.min(1, car.laneProgress + dt / LANE_CHANGE_TIME);
+      const p = car.laneProgress;
+      car.lateral = car.laneFrom + (car.lane - car.laneFrom) * (0.5 - 0.5 * Math.cos(Math.PI * p));
+      car.lateralVel =
+        ((car.lane - car.laneFrom) * 0.5 * Math.PI * Math.sin(Math.PI * p)) / LANE_CHANGE_TIME;
+      if (p === 1) car.lateralVel = 0;
+    } else {
+      car.lateralVel = 0;
+    }
   }
 }
