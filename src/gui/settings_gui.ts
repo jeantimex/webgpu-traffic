@@ -4,7 +4,7 @@ import type { IdmParams } from '../sim/idm';
 export interface TrafficSettings {
   timeScale: number;
   carLength: number;
-  light: { green: number; red: number };
+  light: { green: number; yellow: number; red: number };
   cars: [IdmParams, IdmParams];
 }
 
@@ -19,7 +19,7 @@ export function setupGui(): GuiState {
     settings: {
       timeScale: 1,
       carLength: 4.5,
-      light: { green: 10, red: 8 },
+      light: { green: 10, yellow: 2, red: 8 },
       cars: [
         { v0: 30, T: 1.5, a: 2.0, b: 2.5, s0: 2, delta: 4 },
         { v0: 12, T: 1.5, a: 1.2, b: 2.0, s0: 2, delta: 4 },
@@ -34,6 +34,7 @@ export function setupGui(): GuiState {
 
   const lightFolder = gui.addFolder('Traffic light');
   lightFolder.add(state.settings.light, 'green', 2, 60, 1).name('Green (s)');
+  lightFolder.add(state.settings.light, 'yellow', 1, 10, 0.5).name('Yellow (s)');
   lightFolder.add(state.settings.light, 'red', 2, 60, 1).name('Red (s)');
 
   const names = ['Car A (red)', 'Car B (blue)'];

@@ -1,6 +1,7 @@
 import type { GuiState } from '../gui/settings_gui';
 import { stepRing, type Car, type Obstacle } from '../sim/idm';
 import { identity, lookAt, multiply, perspective, translationRotationY } from '../utils/mat4';
+import { OrbitCamera } from '../utils/orbit';
 import { createBufferWithData, resizeCanvasToDisplaySize, type WebGPUState } from '../webgpu/utils';
 
 const trafficShader = /* wgsl */ `
@@ -59,12 +60,24 @@ const CAR_TINTS: [number, number, number][] = [
 const STOP_S = CIRCUMFERENCE / 4;
 const RED_LIGHT: Obstacle[] = [{ s: STOP_S }];
 const NO_OBSTACLES: Obstacle[] = [];
-/** The lamp hangs just inside the inner road edge at the stop line. */
-const LAMP_POSITION: Vec3 = [
-  (TRACK_RADIUS - ROAD_HALF_WIDTH - 1.2) * Math.cos(STOP_S / TRACK_RADIUS),
-  3,
-  (TRACK_RADIUS - ROAD_HALF_WIDTH - 1.2) * Math.sin(STOP_S / TRACK_RADIUS),
-];
+/** The signal hangs just inside the inner road edge at the stop line. */
+const LAMP_X = (TRACK_RADIUS - ROAD_HALF_WIDTH - 1.2) * Math.cos(STOP_S / TRACK_RADIUS);
+const LAMP_Z = (TRACK_RADIUS - ROAD_HALF_WIDTH - 1.2) * Math.sin(STOP_S / TRACK_RADIUS);
+/** Red on top, yellow in the middle, green at the bottom. */
+const LAMP_HEIGHTS = { red: 3.2, yellow: 2.4, green: 1.6 } as const;
+const LAMP_COLORS: Record<LightPhase, Vec3> = {
+  red: [0.95, 0.15, 0.15],
+  yellow: [0.95, 0.75, 0.1],
+  green: [0.1, 0.85, 0.3],
+};
+const INACTIVE_LAMP_DIM = 0.25;
+
+type LightPhase = 'red' | 'yellow' | 'green';
+
+function lightPhase(clock: number, green: number, yellow: number, red: number): LightPhase {
+  const t = clock % (green + yellow + red);
+  return t < green ? 'green' : t < green + yellow ? 'yellow' : 'red';
+}
 
 type Vec3 = [number, number, number];
 
@@ -142,11 +155,11 @@ function buildStaticMesh(): number[] {
     pushRoadPatch(verts, STOP_S + 0.8, STOP_S + 4.3, r0, r0 + 0.5, paint);
   }
 
-  // Traffic-light pole beside the road, under the lamp.
+  // Traffic-light pole beside the road, tall enough for the three lamps.
   pushBox(
     verts,
-    [LAMP_POSITION[0] - 0.1, 0, LAMP_POSITION[2] - 0.1],
-    [LAMP_POSITION[0] + 0.1, 3, LAMP_POSITION[2] + 0.1],
+    [LAMP_X - 0.1, 0, LAMP_Z - 0.1],
+    [LAMP_X + 0.1, 4, LAMP_Z + 0.1],
     [0.4, 0.4, 0.42],
   );
   return verts;
@@ -183,6 +196,7 @@ export class Renderer {
   private readonly cars: Car[];
   private builtCarLength: number;
   private lightClock = 0;
+  private readonly orbit: OrbitCamera;
   private depthTexture?: GPUTexture;
   private configured = false;
   private animationFrame?: number;
@@ -220,7 +234,7 @@ export class Renderer {
     });
     this.drawBuffer = this.device.createBuffer({
       label: 'per-draw uniforms',
-      size: DRAW_STRIDE * 4,
+      size: DRAW_STRIDE * 6,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -276,6 +290,7 @@ export class Renderer {
       { s: CIRCUMFERENCE / 2, v: this.gui.settings.cars[1].v0, a: 0 },
     ];
     this.builtCarLength = this.gui.settings.carLength;
+    this.orbit = new OrbitCamera(canvas);
   }
 
   start(): void {
@@ -320,23 +335,24 @@ export class Renderer {
     // Fixed-step simulation so IDM behavior is frame-rate independent.
     const dt = Math.min((now - (this.lastTime ?? now)) / 1000, 0.25);
     this.lastTime = now;
-    const { green, red } = this.gui.settings.light;
+    const { green, yellow, red } = this.gui.settings.light;
     this.accumulator = Math.min(this.accumulator + dt * this.gui.settings.timeScale, 1);
     while (this.accumulator >= SIM_STEP) {
       this.lightClock += SIM_STEP;
-      const greenNow = this.lightClock % (green + red) < green;
+      // Yellow brakes like red: stop if you can.
+      const clear = lightPhase(this.lightClock, green, yellow, red) === 'green';
       stepRing(
         this.cars,
         this.gui.settings.cars,
         CIRCUMFERENCE,
         this.gui.settings.carLength,
         SIM_STEP,
-        greenNow ? NO_OBSTACLES : RED_LIGHT,
+        clear ? NO_OBSTACLES : RED_LIGHT,
       );
       this.accumulator -= SIM_STEP;
     }
-    const isGreen = this.lightClock % (green + red) < green;
-    this.gui.telemetry.light = isGreen ? 'green' : 'red';
+    const phase = lightPhase(this.lightClock, green, yellow, red);
+    this.gui.telemetry.light = phase;
 
     // Vehicle length is baked into the car mesh; rebuild it in place when the slider moves.
     if (this.gui.settings.carLength !== this.builtCarLength) {
@@ -356,12 +372,12 @@ export class Renderer {
 
     const viewProj = multiply(
       perspective((42 * Math.PI) / 180, this.canvas.width / this.canvas.height, 0.5, 600),
-      lookAt([0, 110, 110], [0, 0, 0], [0, 1, 0]),
+      lookAt(this.orbit.eye(), [0, 0, 0], [0, 1, 0]),
     );
     this.device.queue.writeBuffer(this.cameraBuffer, 0, viewProj);
 
-    // Uniform slot 0: static track. Slots 1-2: the two cars. Slot 3: the signal lamp.
-    const drawData = new Float32Array(FLOATS_PER_DRAW * 4);
+    // Uniform slot 0: static track. Slots 1-2: the two cars. Slots 3-5: red/yellow/green lamps.
+    const drawData = new Float32Array(FLOATS_PER_DRAW * 6);
     drawData.set(identity(), 0);
     drawData.set([1, 1, 1, 1], 16);
     this.cars.forEach((car, i) => {
@@ -378,8 +394,12 @@ export class Renderer {
       );
       drawData.set([...CAR_TINTS[i], 1], offset + 16);
     });
-    drawData.set(translationRotationY(LAMP_POSITION[0], LAMP_POSITION[1], LAMP_POSITION[2], 0), FLOATS_PER_DRAW * 3);
-    drawData.set(isGreen ? [0.1, 0.85, 0.3, 1] : [0.95, 0.15, 0.15, 1], FLOATS_PER_DRAW * 3 + 16);
+    (['red', 'yellow', 'green'] as const).forEach((lamp, i) => {
+      const offset = FLOATS_PER_DRAW * (i + 3);
+      const scale = phase === lamp ? 1 : INACTIVE_LAMP_DIM;
+      drawData.set(translationRotationY(LAMP_X, LAMP_HEIGHTS[lamp], LAMP_Z, 0), offset);
+      drawData.set([...LAMP_COLORS[lamp].map((c) => c * scale), 1] as number[], offset + 16);
+    });
     this.device.queue.writeBuffer(this.drawBuffer, 0, drawData);
 
     const encoder = this.device.createCommandEncoder({ label: 'frame encoder' });
@@ -407,8 +427,10 @@ export class Renderer {
     pass.draw(this.carVertexCount, 1, this.carFirstVertex);
     pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * 2]);
     pass.draw(this.carVertexCount, 1, this.carFirstVertex);
-    pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * 3]);
-    pass.draw(this.lampVertexCount, 1, this.lampFirstVertex);
+    for (let i = 3; i <= 5; i++) {
+      pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * i]);
+      pass.draw(this.lampVertexCount, 1, this.lampFirstVertex);
+    }
     pass.end();
     this.device.queue.submit([encoder.finish()]);
 
