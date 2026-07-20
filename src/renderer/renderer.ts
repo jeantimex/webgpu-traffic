@@ -1,12 +1,13 @@
 import type { GuiState } from '../gui/settings_gui';
 import { stepRing, type Car, type Obstacle } from '../sim/idm';
-import { identity, lookAt, multiply, perspective, translationRotationY } from '../utils/mat4';
+import { identity, lookAt, multiply, perspective, rotationZ, translationRotationY } from '../utils/mat4';
 import { OrbitCamera } from '../utils/orbit';
 import { createBufferWithData, resizeCanvasToDisplaySize, type WebGPUState } from '../webgpu/utils';
 
 const trafficShader = /* wgsl */ `
   struct Camera {
     viewProj: mat4x4f,
+    lighting: vec4f, // x: ambient, y: diffuse strength
   };
   struct Draw {
     model: mat4x4f,
@@ -41,7 +42,7 @@ const trafficShader = /* wgsl */ `
   fn fragmentMain(input: VertexOutput) -> @location(0) vec4f {
     let light = normalize(vec3f(0.4, 0.9, 0.25));
     let diffuse = max(dot(normalize(input.normal), light), 0.0);
-    return vec4f(input.color * (0.35 + 0.65 * diffuse), 1);
+    return vec4f(input.color * (camera.lighting.x + camera.lighting.y * diffuse), 1);
   }
 `;
 
@@ -56,6 +57,34 @@ const CAR_TINTS: [number, number, number][] = [
   [0.85, 0.27, 0.3], // red
   [0.3, 0.5, 0.95], // blue
 ];
+
+interface Palette {
+  sky: Vec3;
+  ground: Vec3;
+  asphalt: Vec3;
+  wall: Vec3;
+  ambient: number;
+  diffuse: number;
+}
+
+const PALETTES: Record<'day' | 'night', Palette> = {
+  day: {
+    sky: [0.53, 0.75, 0.95],
+    ground: [0.32, 0.47, 0.25],
+    asphalt: [0.38, 0.39, 0.41],
+    wall: [0.3, 0.3, 0.32],
+    ambient: 0.55,
+    diffuse: 0.7,
+  },
+  night: {
+    sky: [0.05, 0.06, 0.09],
+    ground: [0.1, 0.12, 0.1],
+    asphalt: [0.24, 0.25, 0.27],
+    wall: [0.17, 0.17, 0.19],
+    ambient: 0.35,
+    diffuse: 0.65,
+  },
+};
 /** Arc position of the stop line / pedestrian crossing (quarter lap, nearest the camera). */
 const STOP_S = CIRCUMFERENCE / 4;
 const RED_LIGHT: Obstacle[] = [{ s: STOP_S }];
@@ -77,6 +106,25 @@ type LightPhase = 'red' | 'yellow' | 'green';
 function lightPhase(clock: number, green: number, yellow: number, red: number): LightPhase {
   const t = clock % (green + yellow + red);
   return t < green ? 'green' : t < green + yellow ? 'yellow' : 'red';
+}
+
+/** The bridge is a raised-cosine bump on the far side of the ring (clear of the cars' start and the crossing). */
+const BRIDGE_LENGTH = 60; // m along the arc
+const BRIDGE_HEIGHT = 4; // m
+const BRIDGE_START = (3 * CIRCUMFERENCE) / 4 - BRIDGE_LENGTH / 2;
+
+/** Road surface height above the ground at arc position s (0 off the bridge). */
+function roadHeight(s: number): number {
+  if (s < BRIDGE_START || s > BRIDGE_START + BRIDGE_LENGTH) return 0;
+  const u = (s - BRIDGE_START) / BRIDGE_LENGTH;
+  return (BRIDGE_HEIGHT / 2) * (1 - Math.cos(2 * Math.PI * u));
+}
+
+/** Slope (dh/ds) of the road at arc position s. */
+function roadGrade(s: number): number {
+  if (s < BRIDGE_START || s > BRIDGE_START + BRIDGE_LENGTH) return 0;
+  const u = (s - BRIDGE_START) / BRIDGE_LENGTH;
+  return ((BRIDGE_HEIGHT * Math.PI) / BRIDGE_LENGTH) * Math.sin(2 * Math.PI * u);
 }
 
 type Vec3 = [number, number, number];
@@ -122,28 +170,54 @@ function pushRoadPatch(out: number[], s0: number, s1: number, r0: number, r1: nu
 }
 
 /** Ground plane + ring road + crossing paint + light pole, vertex colors baked in. */
-function buildStaticMesh(): number[] {
+function buildStaticMesh(palette: Palette): number[] {
   const verts: number[] = [];
   const G = 300;
-  pushQuad(verts, [[-G, 0, -G], [-G, 0, G], [G, 0, G], [G, 0, -G]], [0.1, 0.12, 0.1]);
+  pushQuad(verts, [[-G, 0, -G], [-G, 0, G], [G, 0, G], [G, 0, -G]], palette.ground);
 
-  const asphalt: Vec3 = [0.24, 0.25, 0.27];
+  const asphalt = palette.asphalt;
+  const wall = palette.wall;
   const inner = TRACK_RADIUS - ROAD_HALF_WIDTH;
   const outer = TRACK_RADIUS + ROAD_HALF_WIDTH;
   const SEGMENTS = 128;
   for (let i = 0; i < SEGMENTS; i++) {
     const t0 = (i / SEGMENTS) * 2 * Math.PI;
     const t1 = ((i + 1) / SEGMENTS) * 2 * Math.PI;
+    const h0 = 0.02 + roadHeight(t0 * TRACK_RADIUS);
+    const h1 = 0.02 + roadHeight(t1 * TRACK_RADIUS);
     pushQuad(
       verts,
       [
-        [inner * Math.cos(t0), 0.02, inner * Math.sin(t0)],
-        [inner * Math.cos(t1), 0.02, inner * Math.sin(t1)],
-        [outer * Math.cos(t1), 0.02, outer * Math.sin(t1)],
-        [outer * Math.cos(t0), 0.02, outer * Math.sin(t0)],
+        [inner * Math.cos(t0), h0, inner * Math.sin(t0)],
+        [inner * Math.cos(t1), h1, inner * Math.sin(t1)],
+        [outer * Math.cos(t1), h1, outer * Math.sin(t1)],
+        [outer * Math.cos(t0), h0, outer * Math.sin(t0)],
       ],
       asphalt,
     );
+    // Side walls under the elevated section so the bridge reads as solid.
+    if (h0 > 0.05 || h1 > 0.05) {
+      pushQuad(
+        verts,
+        [
+          [outer * Math.cos(t0), 0, outer * Math.sin(t0)],
+          [outer * Math.cos(t0), h0, outer * Math.sin(t0)],
+          [outer * Math.cos(t1), h1, outer * Math.sin(t1)],
+          [outer * Math.cos(t1), 0, outer * Math.sin(t1)],
+        ],
+        wall,
+      );
+      pushQuad(
+        verts,
+        [
+          [inner * Math.cos(t0), h0, inner * Math.sin(t0)],
+          [inner * Math.cos(t0), 0, inner * Math.sin(t0)],
+          [inner * Math.cos(t1), 0, inner * Math.sin(t1)],
+          [inner * Math.cos(t1), h1, inner * Math.sin(t1)],
+        ],
+        wall,
+      );
+    }
   }
 
   // Solid stop line across the lane, then a zebra crossing after it: stripes run
@@ -195,6 +269,7 @@ export class Renderer {
   private readonly lampVertexCount: number;
   private readonly cars: Car[];
   private builtCarLength: number;
+  private builtDayMode: boolean;
   private lightClock = 0;
   private readonly orbit: OrbitCamera;
   private depthTexture?: GPUTexture;
@@ -212,7 +287,7 @@ export class Renderer {
     this.context = gpu.context;
     this.format = gpu.format;
 
-    const staticVerts = buildStaticMesh();
+    const staticVerts = buildStaticMesh(this.palette());
     const carVerts = buildCarMesh(this.gui.settings.carLength);
     const lampVerts = buildLampMesh();
     this.staticVertexCount = staticVerts.length / 9;
@@ -229,7 +304,7 @@ export class Renderer {
 
     this.cameraBuffer = this.device.createBuffer({
       label: 'camera uniforms',
-      size: 64,
+      size: 80, // mat4x4 viewProj + vec4 lighting
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.drawBuffer = this.device.createBuffer({
@@ -240,7 +315,11 @@ export class Renderer {
 
     const bindGroupLayout = this.device.createBindGroupLayout({
       entries: [
-        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+        {
+          binding: 0,
+          visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+          buffer: { type: 'uniform' },
+        },
         {
           binding: 1,
           visibility: GPUShaderStage.VERTEX,
@@ -290,12 +369,17 @@ export class Renderer {
       { s: CIRCUMFERENCE / 2, v: this.gui.settings.cars[1].v0, a: 0 },
     ];
     this.builtCarLength = this.gui.settings.carLength;
+    this.builtDayMode = this.gui.settings.dayMode;
     this.orbit = new OrbitCamera(canvas);
   }
 
   start(): void {
     if (this.animationFrame !== undefined) return;
     this.animationFrame = requestAnimationFrame(this.render);
+  }
+
+  private palette(): Palette {
+    return PALETTES[this.gui.settings.dayMode ? 'day' : 'night'];
   }
 
   stop(): void {
@@ -363,6 +447,13 @@ export class Renderer {
         new Float32Array(buildCarMesh(this.builtCarLength)),
       );
     }
+
+    // Ground/asphalt colors are baked into the static mesh; rebuild it on a day/night switch.
+    const palette = this.palette();
+    if (this.gui.settings.dayMode !== this.builtDayMode) {
+      this.builtDayMode = this.gui.settings.dayMode;
+      this.device.queue.writeBuffer(this.vertexBuffer, 0, new Float32Array(buildStaticMesh(palette)));
+    }
     const carLength = this.gui.settings.carLength;
     const gapA =
       ((((this.cars[1].s - this.cars[0].s) % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE) -
@@ -375,6 +466,11 @@ export class Renderer {
       lookAt(this.orbit.eye(), [0, 0, 0], [0, 1, 0]),
     );
     this.device.queue.writeBuffer(this.cameraBuffer, 0, viewProj);
+    this.device.queue.writeBuffer(
+      this.cameraBuffer,
+      64,
+      new Float32Array([palette.ambient, palette.diffuse, 0, 0]),
+    );
 
     // Uniform slot 0: static track. Slots 1-2: the two cars. Slots 3-5: red/yellow/green lamps.
     const drawData = new Float32Array(FLOATS_PER_DRAW * 6);
@@ -384,11 +480,14 @@ export class Renderer {
       const theta = car.s / TRACK_RADIUS;
       const offset = FLOATS_PER_DRAW * (i + 1);
       drawData.set(
-        translationRotationY(
-          TRACK_RADIUS * Math.cos(theta),
-          0.02,
-          TRACK_RADIUS * Math.sin(theta),
-          -theta - Math.PI / 2,
+        multiply(
+          translationRotationY(
+            TRACK_RADIUS * Math.cos(theta),
+            0.02 + roadHeight(car.s),
+            TRACK_RADIUS * Math.sin(theta),
+            -theta - Math.PI / 2,
+          ),
+          rotationZ(Math.atan(roadGrade(car.s))),
         ),
         offset,
       );
@@ -407,7 +506,7 @@ export class Renderer {
       colorAttachments: [
         {
           view: this.context.getCurrentTexture().createView(),
-          clearValue: { r: 0.05, g: 0.06, b: 0.09, a: 1 },
+          clearValue: { r: palette.sky[0], g: palette.sky[1], b: palette.sky[2], a: 1 },
           loadOp: 'clear',
           storeOp: 'store',
         },

@@ -83,3 +83,15 @@ export function translationRotationY(tx: number, ty: number, tz: number, angle: 
   m[14] = tz;
   return m;
 }
+
+/** Rotation around Z — pitches cars along the bridge slope (local +x is the forward axis). */
+export function rotationZ(angle: number): Mat4 {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const m = identity();
+  m[0] = c;
+  m[1] = s;
+  m[4] = -s;
+  m[5] = c;
+  return m;
+}
