@@ -1,5 +1,5 @@
-import { type GuiState } from '../gui/settings_gui';
-import { stepRing, type Car, type IdmParams, type Obstacle } from '../sim/idm';
+import { NEW_CAR_PARAMS, type GuiState } from '../gui/settings_gui';
+import { B_SAFE, idmAcceleration, stepRing, type Car, type IdmParams, type Obstacle } from '../sim/idm';
 import { identity, lookAt, multiply, perspective, rotationZ, translationRotationY } from '../utils/mat4';
 import { OrbitCamera } from '../utils/orbit';
 import { createBufferWithData, resizeCanvasToDisplaySize, type WebGPUState } from '../webgpu/utils';
@@ -419,34 +419,66 @@ export class Renderer {
     return override === 'auto' ? lightPhase(this.lightClock, green, yellow, red) : override;
   }
 
-  /** Spawns a car in the biggest gap on either lane so it never pops in on top of traffic. */
-  private spawnCar(params: IdmParams): Car {
-    let bestS = 0;
-    let bestLane = 0;
-    let bestDist = -1;
+  /**
+   * Best safe spawn slot for a car with `params`, or null when the road is too full.
+   * Safe = neither the new car nor its lane follower would brake harder than B_SAFE.
+   * A car mid-lane-change counts as occupying both lanes.
+   */
+  private findSpawnSlot(params: IdmParams): { s: number; lane: number } | null {
+    const carLength = this.gui.settings.carLength;
+    let best: { s: number; lane: number } | null = null;
+    let bestScore = -Infinity;
     for (let lane = 0; lane <= 1; lane++) {
-      for (let k = 0; k < 16; k++) {
-        const s = (k * CIRCUMFERENCE) / 16;
-        let minDist = Infinity;
-        for (const car of this.cars) {
-          const fwd = (((s - car.s) % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE;
-          minDist = Math.min(minDist, fwd, CIRCUMFERENCE - fwd);
-        }
-        if (minDist > bestDist) {
-          bestDist = minDist;
-          bestS = s;
-          bestLane = lane;
+      for (let k = 0; k < 32; k++) {
+        const s = (k * CIRCUMFERENCE) / 32;
+        let leaderGap = Infinity;
+        let leaderV = params.v0;
+        let followerGap = Infinity;
+        let followerV = params.v0;
+        let followerParams: IdmParams | null = null;
+        this.cars.forEach((car, j) => {
+          if (car.lane !== lane && car.laneProgress >= 1) return;
+          const fwd = (((car.s - s) % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE;
+          if (fwd < leaderGap) {
+            leaderGap = fwd;
+            leaderV = car.v;
+          }
+          const back = (CIRCUMFERENCE - fwd) % CIRCUMFERENCE;
+          if (back < followerGap) {
+            followerGap = back;
+            followerV = car.v;
+            followerParams = this.carParams[j];
+          }
+        });
+        if (idmAcceleration(params.v0, leaderGap - carLength, params.v0 - leaderV, params) < -B_SAFE)
+          continue;
+        if (
+          followerParams !== null &&
+          idmAcceleration(followerV, followerGap - carLength, followerV - params.v0, followerParams) <
+            -B_SAFE
+        )
+          continue;
+        const score = Math.min(leaderGap, followerGap);
+        if (score > bestScore) {
+          bestScore = score;
+          best = { s, lane };
         }
       }
     }
+    return best;
+  }
+
+  /** Spawns a car in the best safe slot (falls back to the ring start; the Add button prevents this). */
+  private spawnCar(params: IdmParams): Car {
+    const slot = this.findSpawnSlot(params) ?? { s: 0, lane: 0 };
     return {
-      s: bestS,
+      s: slot.s,
       v: params.v0,
       a: 0,
-      lane: bestLane,
-      lateral: bestLane,
+      lane: slot.lane,
+      lateral: slot.lane,
       lateralVel: 0,
-      laneFrom: bestLane,
+      laneFrom: slot.lane,
       laneProgress: 1,
       cooldown: 0,
     };
@@ -520,6 +552,7 @@ export class Renderer {
     const dt = Math.min((now - (this.lastTime ?? now)) / 1000, 0.25);
     this.lastTime = now;
     this.syncCars();
+    this.gui.canSpawn = this.findSpawnSlot(NEW_CAR_PARAMS) !== null;
     this.accumulator = Math.min(this.accumulator + dt * this.gui.settings.timeScale, 1);
     while (this.accumulator >= SIM_STEP) {
       this.lightClock += SIM_STEP;

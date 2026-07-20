@@ -13,7 +13,12 @@ export interface GuiState {
   settings: TrafficSettings;
   telemetry: { speeds: Record<string, string>; light: string };
   selectedCar: number;
+  /** Set by the renderer every frame: false when no safe spawn slot exists. */
+  canSpawn: boolean;
 }
+
+/** Default IDM params for an added car (copied on add). */
+export const NEW_CAR_PARAMS: IdmParams = { v0: 20, T: 1.5, a: 2.0, b: 2.5, s0: 2, delta: 4 };
 
 export const carName = (i: number): string => `Car ${i + 1}`;
 
@@ -34,6 +39,7 @@ export function setupGui(): GuiState {
     },
     telemetry: { speeds: {}, light: '' },
     selectedCar: 0,
+    canSpawn: true,
   };
 
   const gui = new GUI({ title: 'Traffic' });
@@ -83,11 +89,12 @@ export function setupGui(): GuiState {
     .add(state, 'selectedCar', {})
     .name('Selected')
     .onChange(refreshCarPanel);
-  carFolder
+  const addController = carFolder
     .add(
       {
         addCar: () => {
-          state.settings.cars.push({ v0: 20, T: 1.5, a: 2.0, b: 2.5, s0: 2, delta: 4 });
+          if (!state.canSpawn) return;
+          state.settings.cars.push({ ...NEW_CAR_PARAMS });
           state.selectedCar = state.settings.cars.length - 1;
           refreshCarPanel();
         },
@@ -95,6 +102,8 @@ export function setupGui(): GuiState {
       'addCar',
     )
     .name('Add car');
+  // The renderer knows the traffic; poll its verdict on whether a safe spawn slot exists.
+  setInterval(() => addController.disable(!state.canSpawn), 250);
   carFolder
     .add(
       {

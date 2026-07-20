@@ -47,7 +47,7 @@ export interface Obstacle {
 // Lane-change tuning (MOBIL-lite).
 const LANE_CHANGE_TIME = 2; // s for the lateral slide
 const LANE_CHANGE_COOLDOWN = 4; // s between one car's lane changes (prevents weaving)
-const B_SAFE = 4; // m/s², the most braking a lane change may impose on anyone
+export const B_SAFE = 4; // m/s², the most braking a lane change (or spawn) may impose on anyone
 const DELTA_A = 0.2; // m/s², minimum advantage that makes a change worthwhile
 const KEEP_RIGHT_GAP = 60; // m, "inner lane is free ahead" threshold for drifting back
 
