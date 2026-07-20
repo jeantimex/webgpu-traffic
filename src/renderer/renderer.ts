@@ -59,11 +59,11 @@ const CAR_TINTS: [number, number, number][] = [
 const STOP_S = CIRCUMFERENCE / 4;
 const RED_LIGHT: Obstacle[] = [{ s: STOP_S }];
 const NO_OBSTACLES: Obstacle[] = [];
-/** The lamp hangs just outside the road edge at the stop line. */
+/** The lamp hangs just inside the inner road edge at the stop line. */
 const LAMP_POSITION: Vec3 = [
-  (TRACK_RADIUS + ROAD_HALF_WIDTH + 1.2) * Math.cos(STOP_S / TRACK_RADIUS),
+  (TRACK_RADIUS - ROAD_HALF_WIDTH - 1.2) * Math.cos(STOP_S / TRACK_RADIUS),
   3,
-  (TRACK_RADIUS + ROAD_HALF_WIDTH + 1.2) * Math.sin(STOP_S / TRACK_RADIUS),
+  (TRACK_RADIUS - ROAD_HALF_WIDTH - 1.2) * Math.sin(STOP_S / TRACK_RADIUS),
 ];
 
 type Vec3 = [number, number, number];
@@ -97,22 +97,15 @@ function pushBox(out: number[], min: Vec3, max: Vec3, color: Vec3): void {
   pushQuad(out, [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], color); // −z
 }
 
-/** Appends a road stripe spanning the full lane width, `thickness` meters along the direction of travel. */
-function pushStripe(out: number[], s: number, thickness: number, color: Vec3): void {
-  const theta = s / TRACK_RADIUS;
-  const rx = Math.cos(theta);
-  const rz = Math.sin(theta);
-  const tx = -Math.sin(theta);
-  const tz = Math.cos(theta);
-  const half = thickness / 2;
-  const inner = TRACK_RADIUS - ROAD_HALF_WIDTH;
-  const outer = TRACK_RADIUS + ROAD_HALF_WIDTH;
-  const at = (radial: number, tangential: number): Vec3 => [
-    rx * radial + tx * tangential,
-    0.03,
-    rz * radial + tz * tangential,
-  ];
-  pushQuad(out, [at(inner, -half), at(inner, half), at(outer, half), at(outer, -half)], color);
+/** Appends a rectangular road patch covering arc [s0, s1] and radius [r0, r1]. */
+function pushRoadPatch(out: number[], s0: number, s1: number, r0: number, r1: number, color: Vec3): void {
+  // ponytail: a single straight quad per patch; over a few meters of arc it sags ~4 cm off the
+  // circle, invisible at this zoom. Segment along the arc if patches get much longer.
+  const at = (s: number, r: number): Vec3 => {
+    const theta = s / TRACK_RADIUS;
+    return [r * Math.cos(theta), 0.03, r * Math.sin(theta)];
+  };
+  pushQuad(out, [at(s0, r0), at(s1, r0), at(s1, r1), at(s0, r1)], color);
 }
 
 /** Ground plane + ring road + crossing paint + light pole, vertex colors baked in. */
@@ -140,10 +133,14 @@ function buildStaticMesh(): number[] {
     );
   }
 
-  // Solid stop line, then zebra stripes in the direction of travel.
+  // Solid stop line across the lane, then a zebra crossing after it: stripes run
+  // parallel to travel, packed across the lane width.
   const paint: Vec3 = [0.9, 0.9, 0.9];
-  pushStripe(verts, STOP_S, 0.5, paint);
-  for (let i = 0; i < 4; i++) pushStripe(verts, STOP_S + 1.2 + i * 1.1, 0.5, paint);
+  pushRoadPatch(verts, STOP_S - 0.125, STOP_S + 0.125, inner, outer, paint);
+  for (let i = 0; i < 7; i++) {
+    const r0 = inner + 0.6 + i * 1.0;
+    pushRoadPatch(verts, STOP_S + 0.8, STOP_S + 4.3, r0, r0 + 0.5, paint);
+  }
 
   // Traffic-light pole beside the road, under the lamp.
   pushBox(
