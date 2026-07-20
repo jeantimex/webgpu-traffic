@@ -6,13 +6,13 @@ export interface TrafficSettings {
   carLength: number;
   dayMode: boolean;
   light: { green: number; yellow: number; red: number };
-  cars: [IdmParams, IdmParams];
-  carLanes: [{ lane: number }, { lane: number }];
+  cars: IdmParams[];
+  carLanes: { lane: number }[];
 }
 
 export interface GuiState {
   settings: TrafficSettings;
-  telemetry: { carA: string; carB: string; light: string };
+  telemetry: { carA: string; carB: string; carC: string; carD: string; light: string };
 }
 
 /** Creates the settings panel and returns its live values. */
@@ -24,12 +24,14 @@ export function setupGui(): GuiState {
       dayMode: true,
       light: { green: 10, yellow: 2, red: 8 },
       cars: [
-        { v0: 30, T: 1.5, a: 2.0, b: 2.5, s0: 2, delta: 4 },
-        { v0: 12, T: 1.5, a: 1.2, b: 2.0, s0: 2, delta: 4 },
+        { v0: 30, T: 1.5, a: 2.0, b: 2.5, s0: 2, delta: 4 }, // red
+        { v0: 12, T: 1.5, a: 1.2, b: 2.0, s0: 2, delta: 4 }, // blue
+        { v0: 20, T: 1.5, a: 1.8, b: 2.2, s0: 2, delta: 4 }, // yellow
+        { v0: 25, T: 1.5, a: 2.2, b: 2.8, s0: 2, delta: 4 }, // white
       ],
-      carLanes: [{ lane: 0 }, { lane: 0 }],
+      carLanes: [{ lane: 0 }, { lane: 0 }, { lane: 1 }, { lane: 1 }],
     },
-    telemetry: { carA: '', carB: '', light: '' },
+    telemetry: { carA: '', carB: '', carC: '', carD: '', light: '' },
   };
 
   const gui = new GUI({ title: 'Traffic' });
@@ -42,7 +44,7 @@ export function setupGui(): GuiState {
   lightFolder.add(state.settings.light, 'yellow', 1, 10, 0.5).name('Yellow (s)');
   lightFolder.add(state.settings.light, 'red', 2, 60, 1).name('Red (s)');
 
-  const names = ['Car A (red)', 'Car B (blue)'];
+  const names = ['Car A (red)', 'Car B (blue)', 'Car C (yellow)', 'Car D (white)'];
   state.settings.cars.forEach((car, i) => {
     const folder = gui.addFolder(names[i]);
     folder.add(state.settings.carLanes[i], 'lane', { Inner: 0, Outer: 1 }).name('Lane');
@@ -54,8 +56,10 @@ export function setupGui(): GuiState {
     folder.add(car, 'delta', 1, 10, 1).name('Accel exponent');
   });
 
-  gui.add(state.telemetry, 'carA').name('A speed').listen();
-  gui.add(state.telemetry, 'carB').name('B speed').listen();
+  gui.add(state.telemetry, 'carA').name('A (red)').listen();
+  gui.add(state.telemetry, 'carB').name('B (blue)').listen();
+  gui.add(state.telemetry, 'carC').name('C (yellow)').listen();
+  gui.add(state.telemetry, 'carD').name('D (white)').listen();
   gui.add(state.telemetry, 'light').name('Light').listen();
   return state;
 }

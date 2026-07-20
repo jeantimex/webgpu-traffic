@@ -58,7 +58,11 @@ const FLOATS_PER_DRAW = DRAW_STRIDE / Float32Array.BYTES_PER_ELEMENT;
 const CAR_TINTS: [number, number, number][] = [
   [0.85, 0.27, 0.3], // red
   [0.3, 0.5, 0.95], // blue
+  [0.95, 0.8, 0.2], // yellow
+  [0.9, 0.9, 0.9], // white
 ];
+/** Start arc positions: each lane's pair begins half a lap apart. */
+const START_S = [0, CIRCUMFERENCE / 2, CIRCUMFERENCE / 4, (3 * CIRCUMFERENCE) / 4];
 
 interface Palette {
   sky: Vec3;
@@ -328,7 +332,8 @@ export class Renderer {
     });
     this.drawBuffer = this.device.createBuffer({
       label: 'per-draw uniforms',
-      size: DRAW_STRIDE * 6,
+      // 1 track + N cars + 3 lamps
+      size: DRAW_STRIDE * (4 + this.gui.settings.cars.length),
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -382,16 +387,13 @@ export class Renderer {
       ],
     });
 
-    // Cars start half a lap apart, each at its desired speed.
-    this.cars = [
-      { s: 0, v: this.gui.settings.cars[0].v0, a: 0, lane: this.gui.settings.carLanes[0].lane },
-      {
-        s: CIRCUMFERENCE / 2,
-        v: this.gui.settings.cars[1].v0,
-        a: 0,
-        lane: this.gui.settings.carLanes[1].lane,
-      },
-    ];
+    // Cars start at their desired speed, each lane's pair half a lap apart.
+    this.cars = this.gui.settings.cars.map((params, i) => ({
+      s: START_S[i % START_S.length],
+      v: params.v0,
+      a: 0,
+      lane: this.gui.settings.carLanes[i].lane,
+    }));
     this.builtCarLength = this.gui.settings.carLength;
     this.builtDayMode = this.gui.settings.dayMode;
     this.orbit = new OrbitCamera(canvas);
@@ -404,6 +406,20 @@ export class Renderer {
 
   private palette(): Palette {
     return PALETTES[this.gui.settings.dayMode ? 'day' : 'night'];
+  }
+
+  /** Bumper gap to the nearest car ahead in the same lane, or null when alone in the lane. */
+  private leaderGap(i: number): number | null {
+    const car = this.cars[i];
+    let gap = Infinity;
+    for (let j = 0; j < this.cars.length; j++) {
+      if (j === i || this.cars[j].lane !== car.lane) continue;
+      gap = Math.min(
+        gap,
+        (((this.cars[j].s - car.s) % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE,
+      );
+    }
+    return Number.isFinite(gap) ? gap - this.gui.settings.carLength : null;
   }
 
   stop(): void {
@@ -445,8 +461,9 @@ export class Renderer {
     this.lastTime = now;
     const { green, yellow, red } = this.gui.settings.light;
     this.accumulator = Math.min(this.accumulator + dt * this.gui.settings.timeScale, 1);
-    this.cars[0].lane = this.gui.settings.carLanes[0].lane;
-    this.cars[1].lane = this.gui.settings.carLanes[1].lane;
+    this.cars.forEach((car, i) => {
+      car.lane = this.gui.settings.carLanes[i].lane;
+    });
     while (this.accumulator >= SIM_STEP) {
       this.lightClock += SIM_STEP;
       // Yellow brakes like red: stop if you can.
@@ -480,17 +497,14 @@ export class Renderer {
       this.builtDayMode = this.gui.settings.dayMode;
       this.device.queue.writeBuffer(this.vertexBuffer, 0, new Float32Array(buildStaticMesh(palette)));
     }
-    const carLength = this.gui.settings.carLength;
-    const sameLane = this.cars[0].lane === this.cars[1].lane;
-    const gapA =
-      ((((this.cars[1].s - this.cars[0].s) % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE) -
-      carLength;
-    this.gui.telemetry.carA = sameLane
-      ? `${this.cars[0].v.toFixed(1)} m/s, gap ${gapA.toFixed(1)} m`
-      : `${this.cars[0].v.toFixed(1)} m/s, other lane`;
-    this.gui.telemetry.carB = sameLane
-      ? `${this.cars[1].v.toFixed(1)} m/s, gap ${(CIRCUMFERENCE - gapA - 2 * carLength).toFixed(1)} m`
-      : `${this.cars[1].v.toFixed(1)} m/s, other lane`;
+    const keys = ['carA', 'carB', 'carC', 'carD'] as const;
+    this.cars.forEach((car, i) => {
+      const gap = this.leaderGap(i);
+      this.gui.telemetry[keys[i]] =
+        gap === null
+          ? `${car.v.toFixed(1)} m/s, free road`
+          : `${car.v.toFixed(1)} m/s, gap ${gap.toFixed(1)} m`;
+    });
 
     const viewProj = multiply(
       perspective((42 * Math.PI) / 180, this.canvas.width / this.canvas.height, 0.5, 600),
@@ -503,8 +517,8 @@ export class Renderer {
       new Float32Array([palette.ambient, palette.diffuse, 0, 0]),
     );
 
-    // Uniform slot 0: static track. Slots 1-2: the two cars. Slots 3-5: red/yellow/green lamps.
-    const drawData = new Float32Array(FLOATS_PER_DRAW * 6);
+    // Uniform slot 0: static track. Slots 1..N: the cars. Then 3 slots: red/yellow/green lamps.
+    const drawData = new Float32Array(FLOATS_PER_DRAW * (4 + this.cars.length));
     drawData.set(identity(), 0);
     drawData.set([1, 1, 1, 1], 16);
     this.cars.forEach((car, i) => {
@@ -526,7 +540,7 @@ export class Renderer {
       drawData.set([...CAR_TINTS[i], 1], offset + 16);
     });
     (['red', 'yellow', 'green'] as const).forEach((lamp, i) => {
-      const offset = FLOATS_PER_DRAW * (i + 3);
+      const offset = FLOATS_PER_DRAW * (i + 1 + this.cars.length);
       const scale = phase === lamp ? 1 : INACTIVE_LAMP_DIM;
       drawData.set(translationRotationY(LAMP_X, LAMP_HEIGHTS[lamp], LAMP_Z, 0), offset);
       drawData.set([...LAMP_COLORS[lamp].map((c) => c * scale), 1] as number[], offset + 16);
@@ -554,12 +568,12 @@ export class Renderer {
     pass.setVertexBuffer(0, this.vertexBuffer);
     pass.setBindGroup(0, this.bindGroup, [0]);
     pass.draw(this.staticVertexCount);
-    pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE]);
-    pass.draw(this.carVertexCount, 1, this.carFirstVertex);
-    pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * 2]);
-    pass.draw(this.carVertexCount, 1, this.carFirstVertex);
-    for (let i = 3; i <= 5; i++) {
-      pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * i]);
+    this.cars.forEach((_, i) => {
+      pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * (i + 1)]);
+      pass.draw(this.carVertexCount, 1, this.carFirstVertex);
+    });
+    for (let i = 0; i < 3; i++) {
+      pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * (1 + this.cars.length + i)]);
       pass.draw(this.lampVertexCount, 1, this.lampFirstVertex);
     }
     pass.end();
