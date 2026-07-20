@@ -7,6 +7,7 @@ export interface TrafficSettings {
   dayMode: boolean;
   light: { green: number; yellow: number; red: number };
   cars: [IdmParams, IdmParams];
+  carLanes: [{ lane: number }, { lane: number }];
 }
 
 export interface GuiState {
@@ -26,6 +27,7 @@ export function setupGui(): GuiState {
         { v0: 30, T: 1.5, a: 2.0, b: 2.5, s0: 2, delta: 4 },
         { v0: 12, T: 1.5, a: 1.2, b: 2.0, s0: 2, delta: 4 },
       ],
+      carLanes: [{ lane: 0 }, { lane: 0 }],
     },
     telemetry: { carA: '', carB: '', light: '' },
   };
@@ -43,6 +45,7 @@ export function setupGui(): GuiState {
   const names = ['Car A (red)', 'Car B (blue)'];
   state.settings.cars.forEach((car, i) => {
     const folder = gui.addFolder(names[i]);
+    folder.add(state.settings.carLanes[i], 'lane', { Inner: 0, Outer: 1 }).name('Lane');
     folder.add(car, 'v0', 5, 40, 1).name('Desired speed (m/s)');
     folder.add(car, 'a', 0.5, 4, 0.1).name('Max accel (m/s²)');
     folder.add(car, 'b', 0.5, 6, 0.1).name('Comfy decel (m/s²)');

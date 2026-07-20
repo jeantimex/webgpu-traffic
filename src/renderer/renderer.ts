@@ -49,6 +49,8 @@ const trafficShader = /* wgsl */ `
 const TRACK_RADIUS = 40;
 const ROAD_HALF_WIDTH = 4;
 const CIRCUMFERENCE = 2 * Math.PI * TRACK_RADIUS;
+/** Lane center radii: lane 0 = inner, lane 1 = outer (two 4 m lanes share the road). */
+const LANE_RADIUS = [TRACK_RADIUS - 2, TRACK_RADIUS + 2];
 const SIM_STEP = 1 / 60;
 /** Byte stride between per-draw uniform slots (WebGPU dynamic-offset alignment). */
 const DRAW_STRIDE = 256;
@@ -169,6 +171,17 @@ function pushRoadPatch(out: number[], s0: number, s1: number, r0: number, r1: nu
   pushQuad(out, [at(s0, r0), at(s1, r0), at(s1, r1), at(s0, r1)], color);
 }
 
+/** Appends a lane-divider dash centered between the two lanes, following the road height. */
+function pushLaneDash(out: number[], s0: number, s1: number, color: Vec3): void {
+  const r0 = TRACK_RADIUS - 0.075;
+  const r1 = TRACK_RADIUS + 0.075;
+  const at = (s: number, r: number): Vec3 => {
+    const theta = s / TRACK_RADIUS;
+    return [r * Math.cos(theta), 0.03 + roadHeight(s), r * Math.sin(theta)];
+  };
+  pushQuad(out, [at(s0, r0), at(s1, r0), at(s1, r1), at(s0, r1)], color);
+}
+
 /** Ground plane + ring road + crossing paint + light pole, vertex colors baked in. */
 function buildStaticMesh(palette: Palette): number[] {
   const verts: number[] = [];
@@ -227,6 +240,12 @@ function buildStaticMesh(palette: Palette): number[] {
   for (let i = 0; i < 7; i++) {
     const r0 = inner + 0.6 + i * 1.0;
     pushRoadPatch(verts, STOP_S + 0.8, STOP_S + 4.3, r0, r0 + 0.5, paint);
+  }
+
+  // Dashed divider between the lanes, skipping the crossing.
+  for (let s = 0; s < CIRCUMFERENCE; s += 6) {
+    if (s > STOP_S - 2 && s < STOP_S + 6) continue;
+    pushLaneDash(verts, s, s + 2, paint);
   }
 
   // Traffic-light pole beside the road, tall enough for the three lamps.
@@ -365,8 +384,13 @@ export class Renderer {
 
     // Cars start half a lap apart, each at its desired speed.
     this.cars = [
-      { s: 0, v: this.gui.settings.cars[0].v0, a: 0 },
-      { s: CIRCUMFERENCE / 2, v: this.gui.settings.cars[1].v0, a: 0 },
+      { s: 0, v: this.gui.settings.cars[0].v0, a: 0, lane: this.gui.settings.carLanes[0].lane },
+      {
+        s: CIRCUMFERENCE / 2,
+        v: this.gui.settings.cars[1].v0,
+        a: 0,
+        lane: this.gui.settings.carLanes[1].lane,
+      },
     ];
     this.builtCarLength = this.gui.settings.carLength;
     this.builtDayMode = this.gui.settings.dayMode;
@@ -421,6 +445,8 @@ export class Renderer {
     this.lastTime = now;
     const { green, yellow, red } = this.gui.settings.light;
     this.accumulator = Math.min(this.accumulator + dt * this.gui.settings.timeScale, 1);
+    this.cars[0].lane = this.gui.settings.carLanes[0].lane;
+    this.cars[1].lane = this.gui.settings.carLanes[1].lane;
     while (this.accumulator >= SIM_STEP) {
       this.lightClock += SIM_STEP;
       // Yellow brakes like red: stop if you can.
@@ -455,11 +481,16 @@ export class Renderer {
       this.device.queue.writeBuffer(this.vertexBuffer, 0, new Float32Array(buildStaticMesh(palette)));
     }
     const carLength = this.gui.settings.carLength;
+    const sameLane = this.cars[0].lane === this.cars[1].lane;
     const gapA =
       ((((this.cars[1].s - this.cars[0].s) % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE) -
       carLength;
-    this.gui.telemetry.carA = `${this.cars[0].v.toFixed(1)} m/s, gap ${gapA.toFixed(1)} m`;
-    this.gui.telemetry.carB = `${this.cars[1].v.toFixed(1)} m/s, gap ${(CIRCUMFERENCE - gapA - 2 * carLength).toFixed(1)} m`;
+    this.gui.telemetry.carA = sameLane
+      ? `${this.cars[0].v.toFixed(1)} m/s, gap ${gapA.toFixed(1)} m`
+      : `${this.cars[0].v.toFixed(1)} m/s, other lane`;
+    this.gui.telemetry.carB = sameLane
+      ? `${this.cars[1].v.toFixed(1)} m/s, gap ${(CIRCUMFERENCE - gapA - 2 * carLength).toFixed(1)} m`
+      : `${this.cars[1].v.toFixed(1)} m/s, other lane`;
 
     const viewProj = multiply(
       perspective((42 * Math.PI) / 180, this.canvas.width / this.canvas.height, 0.5, 600),
@@ -478,13 +509,14 @@ export class Renderer {
     drawData.set([1, 1, 1, 1], 16);
     this.cars.forEach((car, i) => {
       const theta = car.s / TRACK_RADIUS;
+      const r = LANE_RADIUS[car.lane];
       const offset = FLOATS_PER_DRAW * (i + 1);
       drawData.set(
         multiply(
           translationRotationY(
-            TRACK_RADIUS * Math.cos(theta),
+            r * Math.cos(theta),
             0.02 + roadHeight(car.s),
-            TRACK_RADIUS * Math.sin(theta),
+            r * Math.sin(theta),
             -theta - Math.PI / 2,
           ),
           rotationZ(Math.atan(roadGrade(car.s))),

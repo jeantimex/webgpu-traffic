@@ -17,6 +17,7 @@ export interface Car {
   s: number; // arc position along the ring (m), in [0, circumference)
   v: number; // current speed (m/s)
   a: number; // last computed acceleration (m/s²)
+  lane: number; // 0 = inner, 1 = outer
 }
 
 const MIN_GAP = 0.1; // floor for the gap so the interaction term cannot divide by zero
@@ -57,7 +58,7 @@ export function stepRing(
     let gap = Infinity;
     let vLeader = 0;
     for (let j = 0; j < cars.length; j++) {
-      if (j === i) continue;
+      if (j === i || cars[j].lane !== car.lane) continue;
       const d = (((cars[j].s - car.s) % circumference) + circumference) % circumference;
       if (d < gap) {
         gap = d;

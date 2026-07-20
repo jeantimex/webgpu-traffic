@@ -21,8 +21,8 @@ assert(idmAcceleration(25, 5, 25, fast) < 0, 'brakes for a close leader');
 const C = 2 * Math.PI * 40;
 const CAR_LENGTH = 4.5;
 const cars: Car[] = [
-  { s: 0, v: 30, a: 0 },
-  { s: C / 2, v: 12, a: 0 },
+  { s: 0, v: 30, a: 0, lane: 0 },
+  { s: C / 2, v: 12, a: 0, lane: 0 },
 ];
 let minGap = Infinity;
 for (let step = 0; step < 120 * 60; step++) {
@@ -34,7 +34,7 @@ assert(minGap > 0, `no collision (min gap ${minGap.toFixed(2)} m)`);
 assert(Math.abs(cars[0].v - slow.v0) < 0.2, `fast car settles to leader speed (v=${cars[0].v.toFixed(2)})`);
 
 // Red light: a car must stop just before the stop line, then accelerate away once it turns green.
-const lone: Car[] = [{ s: 0, v: 20, a: 0 }];
+const lone: Car[] = [{ s: 0, v: 20, a: 0, lane: 0 }];
 const redLight = [{ s: C / 4 }];
 for (let step = 0; step < 60 * 60; step++) stepRing(lone, [fast], C, CAR_LENGTH, 1 / 60, redLight);
 const distToLine = (((C / 4 - lone[0].s) % C) + C) % C;
@@ -44,5 +44,16 @@ assert(
   `stopped just before the line (${distToLine.toFixed(2)} m from center)`);
 for (let step = 0; step < 10 * 60; step++) stepRing(lone, [fast], C, CAR_LENGTH, 1 / 60);
 assert(lone[0].v > 10, `accelerates on green (v=${lone[0].v.toFixed(1)})`);
+
+// Different lanes: no car-following interaction — the fast car keeps its desired speed.
+const twoLanes: Car[] = [
+  { s: C / 2 + 30, v: 12, a: 0, lane: 0 }, // slow, ahead in the inner lane
+  { s: C / 2, v: 30, a: 0, lane: 1 }, // fast, catching up in the outer lane
+];
+for (let step = 0; step < 60 * 60; step++) stepRing(twoLanes, [slow, fast], C, CAR_LENGTH, 1 / 60);
+assert(
+  Math.abs(twoLanes[1].v - fast.v0) < 0.5,
+  `fast car ignores the slow car in the other lane (v=${twoLanes[1].v.toFixed(2)})`,
+);
 
 console.log(`IDM checks passed (min gap ${minGap.toFixed(2)} m, settled at ${cars[0].v.toFixed(2)} m/s)`);
