@@ -1,5 +1,5 @@
-import type { GuiState } from '../gui/settings_gui';
-import { stepRing, type Car, type Obstacle } from '../sim/idm';
+import { type GuiState } from '../gui/settings_gui';
+import { stepRing, type Car, type IdmParams, type Obstacle } from '../sim/idm';
 import { identity, lookAt, multiply, perspective, rotationZ, translationRotationY } from '../utils/mat4';
 import { OrbitCamera } from '../utils/orbit';
 import { createBufferWithData, resizeCanvasToDisplaySize, type WebGPUState } from '../webgpu/utils';
@@ -55,12 +55,10 @@ const SIM_STEP = 1 / 60;
 /** Byte stride between per-draw uniform slots (WebGPU dynamic-offset alignment). */
 const DRAW_STRIDE = 256;
 const FLOATS_PER_DRAW = DRAW_STRIDE / Float32Array.BYTES_PER_ELEMENT;
-const CAR_TINTS: [number, number, number][] = [
-  [0.85, 0.27, 0.3], // red
-  [0.3, 0.5, 0.95], // blue
-  [0.95, 0.8, 0.2], // yellow
-  [0.9, 0.9, 0.9], // white
-];
+/** Uniform slots are preallocated for this many cars; adding beyond it is a no-op. */
+const MAX_CARS = 16;
+/** Uniform slot of the first signal lamp: after 1 track slot + all car slots. */
+const LAMP_SLOT = 1 + MAX_CARS;
 /** Start arc positions: each lane's pair begins half a lap apart. */
 const START_S = [0, CIRCUMFERENCE / 2, CIRCUMFERENCE / 4, (3 * CIRCUMFERENCE) / 4];
 
@@ -290,7 +288,8 @@ export class Renderer {
   private readonly carVertexCount: number;
   private readonly lampFirstVertex: number;
   private readonly lampVertexCount: number;
-  private readonly cars: Car[];
+  private cars: Car[];
+  private carParams: IdmParams[];
   private builtCarLength: number;
   private builtDayMode: boolean;
   private lightClock = 0;
@@ -332,8 +331,8 @@ export class Renderer {
     });
     this.drawBuffer = this.device.createBuffer({
       label: 'per-draw uniforms',
-      // 1 track + N cars + 3 lamps
-      size: DRAW_STRIDE * (4 + this.gui.settings.cars.length),
+      // 1 track + MAX_CARS car slots + 3 lamps
+      size: DRAW_STRIDE * (4 + MAX_CARS),
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -399,6 +398,7 @@ export class Renderer {
       laneProgress: 1,
       cooldown: 0,
     }));
+    this.carParams = [...this.gui.settings.cars];
     this.builtCarLength = this.gui.settings.carLength;
     this.builtDayMode = this.gui.settings.dayMode;
     this.orbit = new OrbitCamera(canvas);
@@ -411,6 +411,61 @@ export class Renderer {
 
   private palette(): Palette {
     return PALETTES[this.gui.settings.dayMode ? 'day' : 'night'];
+  }
+
+  /** Light phase: the GUI override wins; 'auto' runs the timed cycle. */
+  private currentPhase(): LightPhase {
+    const { green, yellow, red, override } = this.gui.settings.light;
+    return override === 'auto' ? lightPhase(this.lightClock, green, yellow, red) : override;
+  }
+
+  /** Spawns a car in the biggest gap on either lane so it never pops in on top of traffic. */
+  private spawnCar(params: IdmParams): Car {
+    let bestS = 0;
+    let bestLane = 0;
+    let bestDist = -1;
+    for (let lane = 0; lane <= 1; lane++) {
+      for (let k = 0; k < 16; k++) {
+        const s = (k * CIRCUMFERENCE) / 16;
+        let minDist = Infinity;
+        for (const car of this.cars) {
+          const fwd = (((s - car.s) % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE;
+          minDist = Math.min(minDist, fwd, CIRCUMFERENCE - fwd);
+        }
+        if (minDist > bestDist) {
+          bestDist = minDist;
+          bestS = s;
+          bestLane = lane;
+        }
+      }
+    }
+    return {
+      s: bestS,
+      v: params.v0,
+      a: 0,
+      lane: bestLane,
+      lateral: bestLane,
+      lateralVel: 0,
+      laneFrom: bestLane,
+      laneProgress: 1,
+      cooldown: 0,
+    };
+  }
+
+  /** Reconciles the sim cars with the GUI's param list after an add/delete (matched by object identity). */
+  private syncCars(): void {
+    const paramsList = this.gui.settings.cars.slice(0, MAX_CARS);
+    if (paramsList.length === this.cars.length) return;
+    const used = new Set<number>();
+    this.cars = paramsList.map((params) => {
+      const idx = this.carParams.findIndex((p, i) => p === params && !used.has(i));
+      if (idx >= 0) {
+        used.add(idx);
+        return this.cars[idx];
+      }
+      return this.spawnCar(params);
+    });
+    this.carParams = [...paramsList];
   }
 
   /** Bumper gap to the nearest car ahead in the same lane, or null when alone in the lane. */
@@ -464,12 +519,12 @@ export class Renderer {
     // Fixed-step simulation so IDM behavior is frame-rate independent.
     const dt = Math.min((now - (this.lastTime ?? now)) / 1000, 0.25);
     this.lastTime = now;
-    const { green, yellow, red } = this.gui.settings.light;
+    this.syncCars();
     this.accumulator = Math.min(this.accumulator + dt * this.gui.settings.timeScale, 1);
     while (this.accumulator >= SIM_STEP) {
       this.lightClock += SIM_STEP;
       // Yellow brakes like red: stop if you can.
-      const clear = lightPhase(this.lightClock, green, yellow, red) === 'green';
+      const clear = this.currentPhase() === 'green';
       stepRing(
         this.cars,
         this.gui.settings.cars,
@@ -480,7 +535,7 @@ export class Renderer {
       );
       this.accumulator -= SIM_STEP;
     }
-    const phase = lightPhase(this.lightClock, green, yellow, red);
+    const phase = this.currentPhase();
     this.gui.telemetry.light = phase;
 
     // Vehicle length is baked into the car mesh; rebuild it in place when the slider moves.
@@ -499,10 +554,9 @@ export class Renderer {
       this.builtDayMode = this.gui.settings.dayMode;
       this.device.queue.writeBuffer(this.vertexBuffer, 0, new Float32Array(buildStaticMesh(palette)));
     }
-    const keys = ['carA', 'carB', 'carC', 'carD'] as const;
     this.cars.forEach((car, i) => {
       const gap = this.leaderGap(i);
-      this.gui.telemetry[keys[i]] =
+      this.gui.telemetry.speeds[String(i)] =
         gap === null
           ? `${car.v.toFixed(1)} m/s, free road`
           : `${car.v.toFixed(1)} m/s, gap ${gap.toFixed(1)} m`;
@@ -519,8 +573,8 @@ export class Renderer {
       new Float32Array([palette.ambient, palette.diffuse, 0, 0]),
     );
 
-    // Uniform slot 0: static track. Slots 1..N: the cars. Then 3 slots: red/yellow/green lamps.
-    const drawData = new Float32Array(FLOATS_PER_DRAW * (4 + this.cars.length));
+    // Uniform slot 0: static track. Slots 1..N: the cars. Slots LAMP_SLOT..: red/yellow/green lamps.
+    const drawData = new Float32Array(FLOATS_PER_DRAW * (4 + MAX_CARS));
     drawData.set(identity(), 0);
     drawData.set([1, 1, 1, 1], 16);
     this.cars.forEach((car, i) => {
@@ -544,10 +598,17 @@ export class Renderer {
         ),
         offset,
       );
-      drawData.set([...CAR_TINTS[i], 1], offset + 16);
+      // White cars; yellow while changing lanes; the selected car is red.
+      const rgb: Vec3 =
+        i === this.gui.selectedCar
+          ? [0.85, 0.27, 0.3]
+          : car.laneProgress < 1
+            ? [0.95, 0.8, 0.2]
+            : [0.9, 0.9, 0.9];
+      drawData.set([...rgb, 1], offset + 16);
     });
     (['red', 'yellow', 'green'] as const).forEach((lamp, i) => {
-      const offset = FLOATS_PER_DRAW * (i + 1 + this.cars.length);
+      const offset = FLOATS_PER_DRAW * (LAMP_SLOT + i);
       const scale = phase === lamp ? 1 : INACTIVE_LAMP_DIM;
       drawData.set(translationRotationY(LAMP_X, LAMP_HEIGHTS[lamp], LAMP_Z, 0), offset);
       drawData.set([...LAMP_COLORS[lamp].map((c) => c * scale), 1] as number[], offset + 16);
@@ -580,7 +641,7 @@ export class Renderer {
       pass.draw(this.carVertexCount, 1, this.carFirstVertex);
     });
     for (let i = 0; i < 3; i++) {
-      pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * (1 + this.cars.length + i)]);
+      pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * (LAMP_SLOT + i)]);
       pass.draw(this.lampVertexCount, 1, this.lampFirstVertex);
     }
     pass.end();
