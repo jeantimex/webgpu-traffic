@@ -3,7 +3,14 @@
  * Run: node_modules/.bin/esbuild src/sim/idm.check.ts --bundle --format=esm --outfile=.idm.check.mjs && node .idm.check.mjs && rm .idm.check.mjs
  */
 import { idmAcceleration, stepRing, type Car, type IdmParams } from './idm';
-import { buildNetwork, stepNetwork, type Network } from './network';
+import {
+  buildIntersection,
+  IDX,
+  intersectionObstacles,
+  intersectionPhaseAt,
+  type IntersectionState,
+} from './intersection';
+import { buildNetwork, locate, stepNetwork, type Network } from './network';
 import { Road } from './road';
 
 function assert(cond: boolean, msg: string): void {
@@ -221,3 +228,62 @@ for (const shape of ['arc', 'scurve'] as const) {
 }
 
 console.log('Network checks passed');
+
+// ---------------------------------------------------------------------------
+// Intersection (scene 4 building block)
+// ---------------------------------------------------------------------------
+
+// Phase machine: complementary pairs, cycle order and override mapping.
+{
+  const light = { green: 10, yellow: 2, red: 8, override: 'auto' };
+  assert(intersectionPhaseAt(0, light) === 'nsGreen', 'cycle starts nsGreen');
+  assert(intersectionPhaseAt(11, light) === 'nsYellow', 'nsYellow after green');
+  assert(intersectionPhaseAt(13, light) === 'ewGreen', 'ewGreen right after — pairs complement');
+  assert(intersectionPhaseAt(23, light) === 'ewYellow', 'ewYellow next');
+  assert(intersectionPhaseAt(24, light) === 'nsGreen', 'cycle wraps');
+  assert(intersectionPhaseAt(0, { ...light, override: 'red' }) === 'allRed', 'override red');
+  assert(intersectionPhaseAt(0, { ...light, override: 'green' }) === 'nsGreen', 'override green');
+}
+
+const intersectionOf = (): IntersectionState => buildIntersection({ approach: 80, lanesEachWay: 1 });
+
+// nsGreen: a car on the S approach crosses the zone onto the N road.
+{
+  const state = intersectionOf();
+  const car = [newCar(0, 12, 0)]; // S forward lane
+  const obstacles = intersectionObstacles(state, 'nsGreen');
+  let crossV = -1;
+  for (let step = 0; step < 15 * 60; step++) {
+    stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, obstacles);
+    if (crossV < 0 && locate(state.net, car[0].lane).road === IDX.n) crossV = car[0].v;
+  }
+  assert(locate(state.net, car[0].lane).road === IDX.n, `car crossed onto the N road (road ${locate(state.net, car[0].lane).road})`);
+  assert(crossV > 8, `car flowed through the zone (crossed at v=${crossV.toFixed(1)})`);
+}
+
+// allRed: a car on the S approach stops before its stop line.
+{
+  const state = intersectionOf();
+  const car = [newCar(0, 15, 0)];
+  const obstacles = intersectionObstacles(state, 'allRed');
+  for (let step = 0; step < 15 * 60; step++) {
+    stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, obstacles);
+  }
+  assert(car[0].v < 0.01, `stopped at the red (v=${car[0].v.toFixed(3)})`);
+  assert(car[0].s > 68 && car[0].s < 74, `stopped at the line (s=${car[0].s.toFixed(2)})`);
+}
+
+// Conflict safety: while NS flows, the W approach car must wait at its line — no collision in the zone.
+{
+  const state = intersectionOf();
+  // laneOffsets: 2 lanes per road → S fwd = 0, W fwd = 6.
+  const cars = [newCar(0, 12, 0), newCar(0, 12, 6)];
+  const obstacles = intersectionObstacles(state, 'nsGreen');
+  for (let step = 0; step < 15 * 60; step++) {
+    stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, obstacles);
+  }
+  assert(locate(state.net, cars[0].lane).road === IDX.n, 'S car crossed');
+  assert(cars[1].v < 0.01 && cars[1].s < 76, `W car held at its line (s=${cars[1].s.toFixed(1)}, v=${cars[1].v.toFixed(2)})`);
+}
+
+console.log('Intersection checks passed');

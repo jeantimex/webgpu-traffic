@@ -1,5 +1,6 @@
 import GUI, { Controller } from 'lil-gui';
 import type { IdmParams } from '../sim/idm';
+import type { IntersectionConfig } from '../sim/intersection';
 import type { RoadConfig } from '../sim/road';
 
 export interface TrafficSettings {
@@ -11,6 +12,7 @@ export interface TrafficSettings {
   cars: IdmParams[];
   scene3: RoadConfig;
   scene3B: RoadConfig;
+  scene4: IntersectionConfig;
 }
 
 export interface GuiState {
@@ -46,6 +48,7 @@ export function setupGui(): GuiState {
       ],
       scene3: { shape: 'straight', length: 150, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 },
       scene3B: { shape: 'arc', length: 150, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 },
+      scene4: { approach: 80, lanesEachWay: 1 },
     },
     telemetry: { speeds: {}, light: '' },
     selectedCar: 0,
@@ -58,6 +61,7 @@ export function setupGui(): GuiState {
       'Scene 1 (ring)': 1,
       'Scene 2 (square)': 2,
       'Scene 3 (road)': 3,
+      'Scene 4 (intersection)': 4,
     })
     .name('Scene');
   gui.add(state.settings, 'timeScale', 0.1, 3, 0.1).name('Time scale');
@@ -86,6 +90,10 @@ export function setupGui(): GuiState {
   };
   addRoadFolder('Road A (scene 3)', state.settings.scene3);
   addRoadFolder('Road B (scene 3)', state.settings.scene3B);
+
+  const intersectionFolder = gui.addFolder('Intersection (scene 4)');
+  intersectionFolder.add(state.settings.scene4, 'approach', 40, 150, 10).name('Approach (m)');
+  intersectionFolder.add(state.settings.scene4, 'lanesEachWay', 1, 2, 1).name('Lanes each way');
 
   const lightFolder = gui.addFolder('Traffic light');
   lightFolder

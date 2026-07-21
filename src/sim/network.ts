@@ -20,6 +20,12 @@ import {
 } from './idm';
 import type { Road } from './road';
 
+/** A signal stop line on one lane: cars on `lane` brake for a standing obstacle at `s`. */
+export interface NetObstacle {
+  lane: number; // global lane index
+  s: number;
+}
+
 /** A lane exit connected to another road's lane entrance. */
 export interface LaneConnection {
   toRoad: number;
@@ -191,7 +197,14 @@ function updateNetworkLanes(net: Network, cars: Car[], params: IdmParams[], carL
 }
 
 /** Advances every car in the network by one fixed step, crossing seams where connected. */
-export function stepNetwork(net: Network, cars: Car[], params: IdmParams[], carLength: number, dt: number): void {
+export function stepNetwork(
+  net: Network,
+  cars: Car[],
+  params: IdmParams[],
+  carLength: number,
+  dt: number,
+  obstacles: NetObstacle[] = [],
+): void {
   const accels = cars.map((car, i) => {
     const { road: ri, lane: li } = locate(net, car.lane);
     const road = net.roads[ri];
@@ -201,7 +214,14 @@ export function stepNetwork(net: Network, cars: Car[], params: IdmParams[], carL
     if (leader) accel = Math.min(accel, accelToward(car, leader, carLength, params[i]));
     const distToExit = dir > 0 ? road.length - car.s : car.s;
     const down = downstream(net, cars, i, ri, li, distToExit, carLength);
-    return Math.min(accel, idmAcceleration(car.v, down.gap, car.v - down.vLead, params[i]));
+    accel = Math.min(accel, idmAcceleration(car.v, down.gap, car.v - down.vLead, params[i]));
+    // Signal stop lines on this lane (red phases).
+    for (const obstacle of obstacles) {
+      if (obstacle.lane !== car.lane) continue;
+      const d = (obstacle.s - car.s) * dir;
+      if (d > 0) accel = Math.min(accel, idmAcceleration(car.v, d - carLength / 2, car.v, params[i]));
+    }
+    return accel;
   });
 
   updateNetworkLanes(net, cars, params, carLength);

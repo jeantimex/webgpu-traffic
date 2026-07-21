@@ -12,11 +12,31 @@ import {
   networkGapAhead,
   networkSpawnSlot,
   stepNetwork,
+  type NetObstacle,
   type Network,
 } from '../sim/network';
+import {
+  buildIntersection,
+  IDX,
+  intersectionLampColor,
+  intersectionObstacles,
+  intersectionPhaseAt,
+  STOP_BACK,
+  type IntersectionConfig,
+  type IntersectionPhase,
+  type IntersectionState,
+} from '../sim/intersection';
 import { Road, type RoadConfig } from '../sim/road';
 
 export type Vec3 = [number, number, number];
+
+/** Traffic-light timing + override from the GUI. */
+export interface LightSettings {
+  green: number;
+  yellow: number;
+  red: number;
+  override: string;
+}
 
 export interface Pose {
   x: number;
@@ -56,13 +76,18 @@ export const PALETTES: Record<'day' | 'night', Palette> = {
 
 /** Everything the renderer needs from a scene: layout, geometry, car placement, and topology logic. */
 export interface SceneDef {
-  readonly c: number; // loop circumference (m); road length for the open-road scene
-  obstacles: Obstacle[]; // stop lines, active while the light is not green
+  readonly c: number; // loop circumference (m); total length for open networks
   lamps: { x: number; z: number }[]; // signal pole positions
   buildStatic(palette: Palette): number[];
   /** World position, heading angle (around +Y), and pitch for a car. */
   carPose(car: Car): Pose;
-  /** Advances the sim one step; obstacles are the red-light stop lines (may be empty). */
+  /** Current signal phase id (honors the GUI override). */
+  phaseAt(clock: number, light: LightSettings): string;
+  /** Active stop-line obstacles for a phase. */
+  obstaclesFor(phase: string): Obstacle[];
+  /** What one lamp stack shows in a phase. */
+  lampColor(lamp: number, phase: string): 'red' | 'yellow' | 'green';
+  /** Advances the sim one step; obstacles are the active signal stop lines (may be empty). */
   step(cars: Car[], params: IdmParams[], carLength: number, dt: number, obstacles: Obstacle[]): void;
   /** Bumper gap to the nearest car ahead in the same lane, or null when alone. */
   leaderGap(cars: Car[], i: number, carLength: number): number | null;
@@ -73,6 +98,21 @@ export interface SceneDef {
     params: IdmParams,
     carLength: number,
   ): { s: number; lane: number } | null;
+}
+
+function lightPhase(clock: number, green: number, yellow: number, red: number): string {
+  const t = clock % (green + yellow + red);
+  return t < green ? 'green' : t < green + yellow ? 'yellow' : 'red';
+}
+
+/** Signal behavior for the ring scenes: one light, all lamps show the same phase. */
+function ringSignal(stops: Obstacle[]): Pick<SceneDef, 'phaseAt' | 'obstaclesFor' | 'lampColor'> {
+  return {
+    phaseAt: (clock, light) =>
+      light.override === 'auto' ? lightPhase(clock, light.green, light.yellow, light.red) : light.override,
+    obstaclesFor: (phase) => (phase === 'green' ? [] : stops),
+    lampColor: (_lamp, phase) => phase as 'red' | 'yellow' | 'green',
+  };
 }
 
 /** Appends a quad (6 vertices, interleaved position/normal/color). Corners must be CCW seen from outside. */
@@ -300,10 +340,10 @@ function ringTopology(c: number): Pick<SceneDef, 'step' | 'leaderGap' | 'findSpa
 function ringScene(): SceneDef {
   return {
     c: RING_C,
-    obstacles: [{ s: STOP_S }],
     lamps: [RING_LAMP],
     buildStatic: ringStatic,
     ...ringTopology(RING_C),
+    ...ringSignal([{ s: STOP_S }]),
     carPose(car) {
       const theta = car.s / TRACK_RADIUS;
       // Lane centers are 2 m either side of the track radius; lateral eases between them.
@@ -447,12 +487,11 @@ function squareStatic(palette: Palette): number[] {
 function squareScene(): SceneDef {
   return {
     c: SQ_C,
-    obstacles: SQ_STOPS.map((s) => ({ s })),
     lamps: SQ_LAMPS,
     buildStatic: squareStatic,
     ...ringTopology(SQ_C),
-    carPose(car) {
-      const p = squarePathPoint(car.s);
+    ...ringSignal(SQ_STOPS.map((s) => ({ s }))),
+    carPose(car) {      const p = squarePathPoint(car.s);
       // Lane centers are 2 m either side of the centerline (o+ = inner lane, toward the center).
       const o = 2 * (1 - 2 * car.lateral);
       const yaw = Math.atan2(4 * car.lateralVel, Math.max(car.v, 1));
@@ -510,9 +549,10 @@ export function buildScene3(cfgA: RoadConfig, cfgB: RoadConfig): void {
   const net = buildNetwork([roadA, roadB], [[0, 1]]);
   const tA: Transform = { tx: 0, tz: 0, cos: 1, sin: 0 };
   // Rotate B so its start heading matches A's end heading, then translate B's start to A's end.
+  // rotY(phi) rotates the xz-plane angle by -phi, so phi = b0Angle - endAngle.
   const end = roadA.point(roadA.length);
   const b0 = roadB.point(0);
-  const phi = Math.atan2(end.hz, end.hx) - Math.atan2(b0.hz, b0.hx);
+  const phi = Math.atan2(b0.hz, b0.hx) - Math.atan2(end.hz, end.hx);
   const cos = Math.cos(phi);
   const sin = Math.sin(phi);
   const tB: Transform = {
@@ -587,8 +627,8 @@ function roadScene(): SceneDef {
     get c() {
       return requireNet().roads.reduce((sum, road) => sum + road.length, 0);
     },
-    obstacles: [],
     lamps: [],
+    ...ringSignal([]),
     buildStatic: (palette) => {
       const net = requireNet();
       const groundVerts: number[] = [];
@@ -606,4 +646,137 @@ function roadScene(): SceneDef {
   };
 }
 
-export const SCENES: SceneDef[] = [ringScene(), squareScene(), roadScene()];
+// ---------------------------------------------------------------------------
+// Scene 4: a 4-way signalized intersection (straight-through only). Approach
+// roads meet two connectors inside the zone; right-of-way is the 2-phase signal
+// from sim/intersection.ts.
+// ---------------------------------------------------------------------------
+
+export const scene4State: { state: IntersectionState | null; transforms: Transform[]; lamps: { x: number; z: number }[] } = {
+  state: null,
+  transforms: [],
+  lamps: [],
+};
+
+function requireScene4(): IntersectionState {
+  if (!scene4State.state) throw new Error('scene 4 intersection not built yet');
+  return scene4State.state;
+}
+
+/** Rotates/translates a road so road.point(atS) lands at the target pose. */
+function placeAt(road: Road, atS: number, target: { x: number; z: number; hx: number; hz: number }): Transform {
+  const p = road.point(atS);
+  // rotY(phi) rotates the xz-plane angle by -phi, so phi = sourceAngle - targetAngle.
+  const phi = Math.atan2(p.hz, p.hx) - Math.atan2(target.hz, target.hx);
+  const cos = Math.cos(phi);
+  const sin = Math.sin(phi);
+  return {
+    tx: target.x - (p.x * cos + p.z * sin),
+    tz: target.z - (-p.x * sin + p.z * cos),
+    cos,
+    sin,
+  };
+}
+
+/** Builds the intersection network and places every road around the zone. */
+export function buildScene4(cfg: IntersectionConfig): void {
+  const state = buildIntersection(cfg);
+  const zh = state.zoneHalf;
+  const L = cfg.approach;
+  const edge = 4 * cfg.lanesEachWay + 1.2; // lamp offset from the approach centerline
+  scene4State.state = state;
+  scene4State.transforms = [
+    placeAt(state.net.roads[IDX.s], L, { x: 0, z: -zh, hx: 0, hz: 1 }),
+    placeAt(state.net.roads[IDX.n], 0, { x: 0, z: zh, hx: 0, hz: 1 }),
+    placeAt(state.net.roads[IDX.e], 0, { x: zh, z: 0, hx: 1, hz: 0 }),
+    placeAt(state.net.roads[IDX.w], L, { x: -zh, z: 0, hx: 1, hz: 0 }),
+    placeAt(state.net.roads[IDX.nsConn], 0, { x: 0, z: -zh, hx: 0, hz: 1 }),
+    placeAt(state.net.roads[IDX.ewConn], 0, { x: -zh, z: 0, hx: 1, hz: 0 }),
+  ];
+  // Lamp stacks on the right side of each entering approach, just before its stop line.
+  scene4State.lamps = [
+    { x: -edge, z: -zh - 1 }, // S
+    { x: edge, z: zh + 1 }, // N
+    { x: zh + 1, z: -edge }, // E
+    { x: -zh - 1, z: edge }, // W
+  ];
+}
+
+function buildIntersectionStatic(palette: Palette): number[] {
+  const state = requireScene4();
+  const net = state.net;
+  const zh = state.zoneHalf;
+  const verts: number[] = [];
+  const G = 300;
+  pushQuad(verts, [[-G, 0, -G], [-G, 0, G], [G, 0, G], [G, 0, -G]], palette.ground);
+
+  // The zone box (connectors are covered by it, only approaches draw ribbons).
+  pushQuad(verts, [[-zh, 0.02, -zh], [-zh, 0.02, zh], [zh, 0.02, zh], [zh, 0.02, -zh]], palette.asphalt);
+  [IDX.s, IDX.n, IDX.e, IDX.w].forEach((r) => {
+    verts.push(...buildRoadStatic(net.roads[r], palette, scene4State.transforms[r]));
+  });
+
+  // Stop lines on the entering lanes and zebra crossings at both ends of each connector.
+  const paint: Vec3 = [0.9, 0.9, 0.9];
+  const lanes = net.roads[IDX.s].config.lanesForward;
+  const L = net.roads[IDX.s].length;
+  const oMin = -4 * lanes;
+  const oMax = 4 * lanes;
+  const paint_patch = (
+    road: Road,
+    t: Transform,
+    s0: number,
+    s1: number,
+    o0: number,
+    o1: number,
+    y = 0.03,
+  ): void => {
+    pushPathPatch(verts, (s) => applyTransform(road.point(s), t), s0, s1, o0, o1, y, paint);
+  };
+  const [tS, tN, tE, tW] = scene4State.transforms;
+  // Scene-1 layout at every approach: stop line first, then a 3.5 m zebra band across
+  // the full road width, ending just before the zone edge.
+  const stopS = L - STOP_BACK;
+  paint_patch(net.roads[IDX.s], tS, stopS - 0.125, stopS + 0.125, 0, oMax);
+  paint_patch(net.roads[IDX.w], tW, stopS - 0.125, stopS + 0.125, 0, oMax);
+  paint_patch(net.roads[IDX.n], tN, STOP_BACK - 0.125, STOP_BACK + 0.125, oMin, 0);
+  paint_patch(net.roads[IDX.e], tE, STOP_BACK - 0.125, STOP_BACK + 0.125, oMin, 0);
+  [IDX.s, IDX.w].forEach((r, i) => {
+    const t = i === 0 ? tS : tW;
+    for (let k = 0; k < 8; k++) {
+      const o0 = oMin + 0.4 + k * 1.0;
+      paint_patch(net.roads[r], t, stopS + 0.8, stopS + 4.3, o0, o0 + 0.5);
+    }
+  });
+  [IDX.n, IDX.e].forEach((r, i) => {
+    const t = i === 0 ? tN : tE;
+    for (let k = 0; k < 8; k++) {
+      const o0 = oMin + 0.4 + k * 1.0;
+      paint_patch(net.roads[r], t, STOP_BACK - 4.3, STOP_BACK - 0.8, o0, o0 + 0.5);
+    }
+  });
+  return verts;
+}
+
+function intersectionScene(): SceneDef {
+  return {
+    get c() {
+      return requireScene4().net.roads.reduce((sum, road) => sum + road.length, 0);
+    },
+    get lamps() {
+      return scene4State.lamps;
+    },
+    buildStatic: buildIntersectionStatic,
+    carPose: (car) => networkCarPose(requireScene4().net, scene4State.transforms, car),
+    phaseAt: (clock, light) => intersectionPhaseAt(clock, light),
+    obstaclesFor: (phase) => intersectionObstacles(requireScene4(), phase as IntersectionPhase),
+    lampColor: (lamp, phase) => intersectionLampColor(requireScene4(), lamp, phase as IntersectionPhase),
+    step: (cars, params, carLength, dt, obstacles) =>
+      stepNetwork(requireScene4().net, cars, params, carLength, dt, obstacles as NetObstacle[]),
+    leaderGap: (cars, i, carLength) => networkGapAhead(requireScene4().net, cars, i, carLength),
+    findSpawnSlot: (cars, _carParams, params, carLength) =>
+      networkSpawnSlot(requireScene4().net, cars, params, carLength),
+  };
+}
+
+export const SCENES: SceneDef[] = [ringScene(), squareScene(), roadScene(), intersectionScene()];

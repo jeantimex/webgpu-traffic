@@ -1,15 +1,17 @@
 import { MAX_CARS, NEW_CAR_PARAMS, type GuiState } from '../gui/settings_gui';
-import { type Car, type IdmParams, type Obstacle } from '../sim/idm';
+import { type Car, type IdmParams } from '../sim/idm';
 import { locate } from '../sim/network';
 import { identity, lookAt, multiply, perspective, rotationZ, translationRotationY } from '../utils/mat4';
 import { OrbitCamera } from '../utils/orbit';
 import { createBufferWithData, resizeCanvasToDisplaySize, type WebGPUState } from '../webgpu/utils';
 import {
   buildScene3,
+  buildScene4,
   PALETTES,
   SCENES,
   pushBox,
   scene3State,
+  scene4State,
   type Palette,
   type SceneDef,
   type Vec3,
@@ -69,7 +71,6 @@ const FLOATS_PER_DRAW = DRAW_STRIDE / Float32Array.BYTES_PER_ELEMENT;
 const LAMP_SLOT = 1 + MAX_CARS;
 /** Total uniform slots: track + cars + up to 4 lights × 3 lamps. */
 const TOTAL_SLOTS = 1 + MAX_CARS + 12;
-const NO_OBSTACLES: Obstacle[] = [];
 
 /** Red on top, yellow in the middle, green at the bottom. */
 const LAMP_HEIGHTS = { red: 3.2, yellow: 2.4, green: 1.6 } as const;
@@ -81,11 +82,6 @@ const LAMP_COLORS: Record<LightPhase, Vec3> = {
 const INACTIVE_LAMP_DIM = 0.25;
 
 type LightPhase = 'red' | 'yellow' | 'green';
-
-function lightPhase(clock: number, green: number, yellow: number, red: number): LightPhase {
-  const t = clock % (green + yellow + red);
-  return t < green ? 'green' : t < green + yellow ? 'yellow' : 'red';
-}
 
 /** A car-shaped box, white so the per-draw tint shows through. */
 function buildCarMesh(carLength: number): number[] {
@@ -145,6 +141,9 @@ export class Renderer {
     if (this.scene === 3) {
       buildScene3(this.gui.settings.scene3, this.gui.settings.scene3B);
       this.roadKey = JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B]);
+    } else if (this.scene === 4) {
+      buildScene4(this.gui.settings.scene4);
+      this.roadKey = JSON.stringify(this.gui.settings.scene4);
     }
     this.def = SCENES[this.scene - 1];
 
@@ -255,18 +254,15 @@ export class Renderer {
     return PALETTES[this.gui.settings.dayMode ? 'day' : 'night'];
   }
 
-  /** Light phase: the GUI override wins; 'auto' runs the timed cycle. */
-  private currentPhase(): LightPhase {
-    const { green, yellow, red, override } = this.gui.settings.light;
-    return override === 'auto' ? lightPhase(this.lightClock, green, yellow, red) : override;
-  }
-
   /** Switches the active scene: rebuilds the static mesh and restarts traffic. */
   private applyScene(scene: number): void {
     this.scene = scene;
     if (scene === 3) {
       buildScene3(this.gui.settings.scene3, this.gui.settings.scene3B);
       this.roadKey = JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B]);
+    } else if (scene === 4) {
+      buildScene4(this.gui.settings.scene4);
+      this.roadKey = JSON.stringify(this.gui.settings.scene4);
     }
     this.def = SCENES[scene - 1];
     const staticVerts = this.def.buildStatic(this.palette());
@@ -288,7 +284,7 @@ export class Renderer {
    */
   private resetCars(): void {
     const c = this.def.c;
-    const net = this.scene === 3 ? scene3State.net : null;
+    const net = this.scene === 3 ? scene3State.net : this.scene === 4 ? (scene4State.state?.net ?? null) : null;
     const numLanes = net ? net.numLanes : 2;
     const laneFor = (i: number): number =>
       net ? i % numLanes : START_LANES[i % START_LANES.length] % numLanes;
@@ -350,10 +346,13 @@ export class Renderer {
 
   private readonly render = (now: number): void => {
     if (this.gui.settings.scene !== this.scene) this.applyScene(this.gui.settings.scene);
-    // Scene 3's roads are user-configurable: any change clears traffic and re-deals fresh cars.
-    if (this.scene === 3) {
-      const key = JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B]);
-      if (key !== this.roadKey) this.applyScene(3);
+    // Network scenes are user-configurable: any change clears traffic and re-deals fresh cars.
+    if (this.scene === 3 || this.scene === 4) {
+      const key =
+        this.scene === 3
+          ? JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B])
+          : JSON.stringify(this.gui.settings.scene4);
+      if (key !== this.roadKey) this.applyScene(this.scene);
     }
 
     const resized = resizeCanvasToDisplaySize(this.canvas, this.device.limits.maxTextureDimension2D);
@@ -383,20 +382,20 @@ export class Renderer {
       this.def.findSpawnSlot(this.cars, this.carParams, NEW_CAR_PARAMS, this.gui.settings.carLength) !==
       null;
     this.accumulator = Math.min(this.accumulator + dt * this.gui.settings.timeScale, 1);
+    let phase = '';
     while (this.accumulator >= SIM_STEP) {
       this.lightClock += SIM_STEP;
-      // Yellow brakes like red: stop if you can.
-      const clear = this.currentPhase() === 'green';
+      phase = this.def.phaseAt(this.lightClock, this.gui.settings.light);
       this.def.step(
         this.cars,
         this.gui.settings.cars,
         this.gui.settings.carLength,
         SIM_STEP,
-        clear ? NO_OBSTACLES : this.def.obstacles,
+        this.def.obstaclesFor(phase),
       );
       this.accumulator -= SIM_STEP;
     }
-    const phase = this.currentPhase();
+    phase = this.def.phaseAt(this.lightClock, this.gui.settings.light);
     this.gui.telemetry.light = phase;
 
     // Vehicle length is baked into the car mesh; rebuild it in place when the slider moves.
@@ -459,9 +458,10 @@ export class Renderer {
       drawData.set([...rgb, 1], offset + 16);
     });
     this.def.lamps.forEach((pos, li) => {
+      const lit = this.def.lampColor(li, phase);
       (['red', 'yellow', 'green'] as const).forEach((lamp, ci) => {
         const offset = FLOATS_PER_DRAW * (LAMP_SLOT + li * 3 + ci);
-        const scale = phase === lamp ? 1 : INACTIVE_LAMP_DIM;
+        const scale = lit === lamp ? 1 : INACTIVE_LAMP_DIM;
         drawData.set(translationRotationY(pos.x, LAMP_HEIGHTS[lamp], pos.z, 0), offset);
         drawData.set([...LAMP_COLORS[lamp].map((c) => c * scale), 1] as number[], offset + 16);
       });
