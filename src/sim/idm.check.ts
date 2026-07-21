@@ -10,11 +10,11 @@ import {
 } from '../renderer/scenes';
 import {
   buildIntersection,
-  IDX,
   intersectionObstacles,
   intersectionPhaseAt,
   leftTurnYieldObstacles,
   STOP_BACK,
+  type IntersectionConfig,
   type IntersectionState,
 } from './intersection';
 import { buildNetwork, locate, stepNetwork, type NetObstacle, type Network } from './network';
@@ -253,7 +253,9 @@ console.log('Network checks passed');
   assert(intersectionPhaseAt(0, { ...light, override: 'green' }) === 'nsGreen', 'override green');
 }
 
-const intersectionOf = (): IntersectionState => buildIntersection({ approach: 80, lanesEachWay: 1 });
+const OPEN = { n: 'open', e: 'open', s: 'open', w: 'open' } as const;
+const intersectionOf = (closed: IntersectionConfig['closed'] = { ...OPEN }): IntersectionState =>
+  buildIntersection({ approach: 80, lanesEachWay: 1, closed });
 
 // nsGreen: a car on the S approach crosses the zone onto the N road.
 {
@@ -263,9 +265,9 @@ const intersectionOf = (): IntersectionState => buildIntersection({ approach: 80
   let crossV = -1;
   for (let step = 0; step < 15 * 60; step++) {
     stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, obstacles);
-    if (crossV < 0 && locate(state.net, car[0].lane).road === IDX.n) crossV = car[0].v;
+    if (crossV < 0 && locate(state.net, car[0].lane).road === state.roadIndex.n) crossV = car[0].v;
   }
-  assert(locate(state.net, car[0].lane).road === IDX.n, `car crossed onto the N road (road ${locate(state.net, car[0].lane).road})`);
+  assert(locate(state.net, car[0].lane).road === state.roadIndex.n, `car crossed onto the N road (road ${locate(state.net, car[0].lane).road})`);
   assert(crossV > 8, `car flowed through the zone (crossed at v=${crossV.toFixed(1)})`);
 }
 
@@ -284,13 +286,13 @@ const intersectionOf = (): IntersectionState => buildIntersection({ approach: 80
 // Conflict safety: while NS flows, the W approach car must wait at its line — no collision in the zone.
 {
   const state = intersectionOf();
-  // laneOffsets: 2 lanes per road → S fwd = 0, W fwd = 6.
-  const cars = [newCar(0, 12, 0), newCar(0, 12, 6)];
+  const wFwd = state.net.laneOffsets[state.roadIndex.w]; // W forward lane (global)
+  const cars = [newCar(0, 12, 0), newCar(0, 12, wFwd)];
   const obstacles = intersectionObstacles(state, 'nsGreen');
   for (let step = 0; step < 15 * 60; step++) {
     stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, obstacles);
   }
-  assert(locate(state.net, cars[0].lane).road === IDX.n, 'S car crossed');
+  assert(locate(state.net, cars[0].lane).road === state.roadIndex.n, 'S car crossed');
   assert(cars[1].v < 0.01 && cars[1].s < 76, `W car held at its line (s=${cars[1].s.toFixed(1)}, v=${cars[1].v.toFixed(2)})`);
 }
 
@@ -312,17 +314,18 @@ const signalWithYield = (state: IntersectionState, cars: Car[]): NetObstacle[] =
   for (let step = 0; step < 20 * 60; step++) {
     stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, signalWithYield(state, car));
   }
-  assert(locate(state.net, car[0].lane).road === IDX.w, `S car turned right onto W (road ${locate(state.net, car[0].lane).road})`);
+  assert(locate(state.net, car[0].lane).road === state.roadIndex.w, `S car turned right onto W (road ${locate(state.net, car[0].lane).road})`);
 }
 
 // Right turn does NOT yield to opposing traffic.
 {
   const state = intersectionOf();
-  const cars = [newCar(0, 12, 0, 1), newCar(30, 12, 3, 0)]; // S-right + N backward approaching
+  const nBack = state.net.laneOffsets[state.roadIndex.n] + 1; // N backward lane (global)
+  const cars = [newCar(0, 12, 0, 1), newCar(30, 12, nBack, 0)]; // S-right + N backward approaching
   let minV = Infinity;
   for (let step = 0; step < 8 * 60; step++) {
     stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
-    if (locate(state.net, cars[0].lane).road === IDX.s) minV = Math.min(minV, cars[0].v);
+    if (locate(state.net, cars[0].lane).road === state.roadIndex.s) minV = Math.min(minV, cars[0].v);
   }
   assert(minV > 10, `right turn never yielded (min approach speed ${minV.toFixed(2)})`);
 }
@@ -330,7 +333,8 @@ const signalWithYield = (state: IntersectionState, cars: Car[]): NetObstacle[] =
 // Left turn yields: the S car waits at the line until the opposing car has passed, then turns onto E.
 {
   const state = intersectionOf();
-  const cars = [newCar(60, 12, 0, 2), newCar(30, 12, 3, 0)]; // S-left + N backward opposing
+  const nBack = state.net.laneOffsets[state.roadIndex.n] + 1;
+  const cars = [newCar(60, 12, 0, 2), newCar(30, 12, nBack, 0)]; // S-left + N backward opposing
   const stopLine = 80 - STOP_BACK;
   for (let step = 0; step < 2 * 60; step++) {
     stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
@@ -339,7 +343,7 @@ const signalWithYield = (state: IntersectionState, cars: Car[]): NetObstacle[] =
   for (let step = 0; step < 28 * 60; step++) {
     stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
   }
-  assert(locate(state.net, cars[0].lane).road === IDX.e, `S car turned left onto E after yielding (road ${locate(state.net, cars[0].lane).road})`);
+  assert(locate(state.net, cars[0].lane).road === state.roadIndex.e, `S car turned left onto E after yielding (road ${locate(state.net, cars[0].lane).road})`);
 }
 
 console.log('Turn checks passed');
@@ -373,12 +377,13 @@ console.log('Turn checks passed');
     ],
   };
   for (const handed of [1, -1]) {
-    buildScene4({ approach: 80, lanesEachWay: 1 }, handed);
+    buildScene4({ approach: 80, lanesEachWay: 1, closed: { n: 'open', e: 'open', s: 'open', w: 'open' } }, handed);
     const def = SCENES[3];
     const net = scene4State.state!.net;
     const expected = handed === 1 ? tables[1] : tables[-1];
+    const arcKeys = ['sRight', 'sLeft', 'nRight', 'nLeft', 'eRight', 'eLeft', 'wRight', 'wLeft'];
     for (let k = 0; k < 8; k++) {
-      const roadIdx = 6 + k;
+      const roadIdx = scene4State.state!.roadIndex[arcKeys[k]];
       const g = net.laneOffsets[roadIdx];
       const car: Car = {
         s: net.roads[roadIdx].length,
@@ -396,13 +401,89 @@ console.log('Turn checks passed');
       const [ex, ez, ehx, ehz] = expected[k];
       assert(
         Math.abs(pose.x - ex) < 1 && Math.abs(pose.z - ez) < 1,
-        `arc ${roadIdx} ends at its exit lane (handed ${handed}, got ${pose.x.toFixed(1)}, ${pose.z.toFixed(1)})`,
+        `arc ${arcKeys[k]} ends at its exit lane (handed ${handed}, got ${pose.x.toFixed(1)}, ${pose.z.toFixed(1)})`,
       );
       assert(
         Math.abs(Math.cos(pose.angle) - ehx) < 0.2 && Math.abs(-Math.sin(pose.angle) - ehz) < 0.2,
-        `arc ${roadIdx} exits with the right heading (handed ${handed})`,
+        `arc ${arcKeys[k]} exits with the right heading (handed ${handed})`,
       );
     }
   }
   console.log('Turn geometry checks passed');
 }
+
+// ---------------------------------------------------------------------------
+// Way closures: T (one way fully closed), L (two adjacent closed), one-way states
+// ---------------------------------------------------------------------------
+
+// T intersection: N fully closed — no N road, no straight from S, turns still work.
+{
+  const state = intersectionOf({ n: 'both', e: 'open', s: 'open', w: 'open' });
+  assert(state.roadIndex.n === undefined, 'N road is not built');
+  assert(state.roadIndex.nsConn === undefined, 'NS connector dropped when N is closed');
+  const sFwd = state.net.laneOffsets[state.roadIndex.s];
+  assert(!state.net.exit[state.roadIndex.s][0][0], 'S straight route is unavailable');
+
+  const car = [newCar(0, 12, sFwd, 2)]; // S-left still flows
+  for (let step = 0; step < 20 * 60; step++) {
+    stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, signalWithYield(state, car));
+  }
+  assert(locate(state.net, car[0].lane).road === state.roadIndex.e, 'S turns left onto E in a T');
+}
+
+// L corner: N and W fully closed — the surviving movements are S-left → E and E-right → S.
+{
+  const state = intersectionOf({ n: 'both', e: 'open', s: 'open', w: 'both' });
+  assert(state.roadIndex.n === undefined && state.roadIndex.w === undefined, 'N and W not built');
+  const sFwd = state.net.laneOffsets[state.roadIndex.s];
+  const eBack = state.net.laneOffsets[state.roadIndex.e] + 1;
+  const cars = [newCar(0, 12, sFwd, 2), newCar(20, 12, eBack, 1)];
+  for (let step = 0; step < 25 * 60; step++) {
+    // No signal needed here: with N/W closed there is no opposing stream to yield to.
+    stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, leftTurnYieldObstacles(state, cars));
+  }
+  assert(locate(state.net, cars[0].lane).road === state.roadIndex.e, 'S turns left onto E in an L');
+  assert(locate(state.net, cars[1].lane).road === state.roadIndex.s, 'E turns right onto S in an L');
+}
+
+// One-way-in: S exit closed — S traffic enters and crosses, but nothing flows back into S.
+{
+  const state = intersectionOf({ n: 'open', e: 'open', s: 'out', w: 'open' });
+  const sFwd = state.net.laneOffsets[state.roadIndex.s];
+  const car = [newCar(0, 12, sFwd, 0)];
+  for (let step = 0; step < 15 * 60; step++) {
+    stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, signalWithYield(state, car));
+  }
+  assert(locate(state.net, car[0].lane).road === state.roadIndex.n, 'S traffic still crosses one-way-in');
+  // No connection anywhere targets the S road (exit side closed).
+  const targetsS = state.net.exit.some((roadExits) =>
+    roadExits.some((conns) => conns.some((conn) => conn && conn.toRoad === state.roadIndex.s)),
+  );
+  assert(!targetsS, 'no traffic flows into S when its exit is closed');
+}
+
+// Exit-closed far side kills the straight route: with N exit closed, S must turn —
+// nobody may park in the zone.
+{
+  const state = intersectionOf({ n: 'out', e: 'open', s: 'open', w: 'open' });
+  const sFwd = state.net.laneOffsets[state.roadIndex.s];
+  assert(!state.net.exit[state.roadIndex.s][0][0], 'S straight route unavailable when N exit is closed');
+  // N backward straight still flows (into S, which is open).
+  const nBack = state.net.laneOffsets[state.roadIndex.n] + 1;
+  const cars = [newCar(0, 12, sFwd, 1), newCar(30, 12, nBack, 0)];
+  for (let step = 0; step < 20 * 60; step++) {
+    stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
+  }
+  assert(locate(state.net, cars[0].lane).road === state.roadIndex.w, 'S turns right onto W');
+  assert(locate(state.net, cars[1].lane).road === state.roadIndex.s, 'N straight still reaches S');
+}
+
+// One-way-out: W entry closed — no spawns on W's entering lanes, entry dead-ends.
+{
+  const state = intersectionOf({ n: 'open', e: 'open', s: 'open', w: 'in' });
+  const wFwd = state.net.laneOffsets[state.roadIndex.w];
+  assert(state.net.closedLanes.has(wFwd), 'W entering lane is spawn-blocked');
+  assert(state.net.exit[state.roadIndex.w][0].length === 0, 'W entry dead-ends at the zone');
+}
+
+console.log('Closure checks passed');

@@ -43,8 +43,10 @@ export interface Network {
   /** Prefix sums of lane counts: global lane index = laneOffsets[road] + localLane. */
   laneOffsets: number[];
   numLanes: number;
-  /** exit[road][lane] = route-indexed connections at that lane's travel end (empty = stop sign). */
-  exit: LaneConnection[][][];
+  /** exit[road][lane] = route-indexed connections at that lane's travel end (empty = stop sign; null entry = route unavailable). */
+  exit: (LaneConnection | null)[][][];
+  /** Global lanes closed to spawning (e.g. an entry-closed approach at an intersection). */
+  closedLanes: Set<number>;
 }
 
 export function globalLane(net: Network, road: number, lane: number): number {
@@ -105,7 +107,7 @@ export function buildNetwork(roads: Road[], links: RoadLink[]): Network {
       });
     }
   }
-  return { roads, laneOffsets, numLanes: total, exit };
+  return { roads, laneOffsets, numLanes: total, exit, closedLanes: new Set() };
 }
 
 /** The connection a car follows at its lane's end, by route (clamped to what exists). */
@@ -308,7 +310,9 @@ export function networkSpawnSlot(
   const fed = new Set<number>();
   net.roads.forEach((_, r) => {
     net.exit[r].forEach((conns) => {
-      conns.forEach((conn) => fed.add(globalLane(net, conn.toRoad, conn.toLane)));
+      conns.forEach((conn) => {
+        if (conn) fed.add(globalLane(net, conn.toRoad, conn.toLane));
+      });
     });
   });
 
@@ -317,7 +321,7 @@ export function networkSpawnSlot(
   net.roads.forEach((road, ri) => {
     road.lanes.forEach((lane, li) => {
       const g = globalLane(net, ri, li);
-      if (fed.has(g)) return;
+      if (fed.has(g) || net.closedLanes.has(g)) return;
       const s = lane.direction > 0 ? 0 : road.length;
       let leaderGap = Infinity;
       let leaderV = params.v0;

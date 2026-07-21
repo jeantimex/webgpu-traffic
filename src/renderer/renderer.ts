@@ -90,10 +90,11 @@ function buildCarMesh(carLength: number): number[] {
   return verts;
 }
 
-/** Random exit choice for intersection traffic: mostly straight, sometimes a turn. */
-function randomRoute(): number {
-  const r = Math.random();
-  return r < 0.6 ? 0 : r < 0.8 ? 1 : 2;
+/** Random exit choice among the routes a lane actually has: mostly straight, sometimes a turn. */
+function randomRoute(available: number[]): number {
+  if (available.includes(0) && Math.random() < 0.6) return 0;
+  const turns = available.filter((r) => r !== 0);
+  return turns.length > 0 ? turns[Math.floor(Math.random() * turns.length)] : 0;
 }
 
 /** The signal lamp box, white so the per-draw red/green tint shows through. */
@@ -288,9 +289,24 @@ export class Renderer {
     this.lightClock = 0;
   }
 
+  /** Last-resort spawn slot: the first lane entrance that is not closed. */
+  private fallbackSlot(): { s: number; lane: number } {
+    const net = this.scene === 3 ? scene3State.net : this.scene === 4 ? (scene4State.state?.net ?? null) : null;
+    if (net) {
+      for (let g = 0; g < net.numLanes; g++) {
+        if (net.closedLanes.has(g)) continue;
+        const { road: ri, lane: li } = locate(net, g);
+        const road = net.roads[ri];
+        return { s: road.lanes[li].direction > 0 ? 0 : road.length, lane: g };
+      }
+    }
+    return { s: 0, lane: 0 };
+  }
+
   /**
    * Places all cars for the current scene. Ring scenes deal fixed pairs per lane;
-   * scene 3 deals round-robin over every network lane, spread along each lane's road.
+   * scene 3 deals round-robin; scene 4 places each car through the safe-slot search
+   * so nothing ever spawns on a closed lane.
    */
   private resetCars(): void {
     const c = this.def.c;
@@ -298,17 +314,40 @@ export class Renderer {
     const numLanes = net ? net.numLanes : 2;
     const laneFor = (i: number): number =>
       net ? i % numLanes : START_LANES[i % START_LANES.length] % numLanes;
+    if (this.scene === 4 && net) {
+      const cars: Car[] = [];
+      const carParams: IdmParams[] = [];
+      this.gui.settings.cars.forEach((params) => {
+        const slot =
+          this.def.findSpawnSlot(cars, carParams, params, this.gui.settings.carLength) ??
+          this.fallbackSlot();
+        carParams.push(params);
+        cars.push({
+          s: slot.s,
+          v: params.v0,
+          a: 0,
+          lane: slot.lane,
+          route: randomRoute(this.availableRoutes(slot.lane)),
+          lateral: slot.lane,
+          lateralVel: 0,
+          laneFrom: slot.lane,
+          laneProgress: 1,
+          cooldown: 0,
+        });
+      });
+      this.cars = cars;
+      this.carParams = carParams;
+      return;
+    }
     this.cars = this.gui.settings.cars.map((params, i) => {
       const lane = laneFor(i);
-      const span = net
-        ? net.roads[locate(net, lane).road].length
-        : c;
+      const span = net ? net.roads[locate(net, lane).road].length : c;
       return {
         s: START_FRACTIONS[i % START_FRACTIONS.length] * span,
         v: params.v0,
         a: 0,
         lane,
-        route: this.scene === 4 ? randomRoute() : 0,
+        route: 0,
         lateral: lane,
         lateralVel: 0,
         laneFrom: lane,
@@ -319,19 +358,17 @@ export class Renderer {
     this.carParams = [...this.gui.settings.cars];
   }
 
-  /** Spawns a car in the scene's best safe slot (falls back to the start; the Add button prevents this). */
+  /** Spawns a car in the scene's best safe slot (falls back to the first open lane entrance). */
   private spawnCar(params: IdmParams): Car {
     const slot =
-      this.def.findSpawnSlot(this.cars, this.carParams, params, this.gui.settings.carLength) ?? {
-        s: 0,
-        lane: 0,
-      };
+      this.def.findSpawnSlot(this.cars, this.carParams, params, this.gui.settings.carLength) ??
+      this.fallbackSlot();
     return {
       s: slot.s,
       v: params.v0,
       a: 0,
       lane: slot.lane,
-      route: this.scene === 4 ? randomRoute() : 0,
+      route: this.scene === 4 ? randomRoute(this.availableRoutes(slot.lane)) : 0,
       lateral: slot.lane,
       lateralVel: 0,
       laneFrom: slot.lane,
@@ -354,6 +391,14 @@ export class Renderer {
       return this.spawnCar(params);
     });
     this.carParams = [...paramsList];
+  }
+
+  /** Route indices available on a lane (scene 4); [0] elsewhere. */
+  private availableRoutes(lane: number): number[] {
+    if (this.scene !== 4 || !scene4State.state) return [0];
+    const net = scene4State.state.net;
+    const { road: ri, lane: li } = locate(net, lane);
+    return net.exit[ri][li].flatMap((conn, i) => (conn ? [i] : []));
   }
 
   /** Cars stopped at an unconnected end "left the map": respawn them at a safe entrance. */
@@ -383,7 +428,7 @@ export class Renderer {
       car.v = this.carParams[i].v0;
       car.a = 0;
       car.cooldown = 0;
-      car.route = this.scene === 4 ? randomRoute() : 0;
+      car.route = this.scene === 4 ? randomRoute(this.availableRoutes(slot.lane)) : 0;
     });
   }
 

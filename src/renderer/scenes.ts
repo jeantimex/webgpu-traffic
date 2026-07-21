@@ -16,9 +16,7 @@ import {
   type Network,
 } from '../sim/network';
 import {
-  ARC,
   buildIntersection,
-  IDX,
   intersectionLampColor,
   intersectionObstacles,
   intersectionPhaseAt,
@@ -673,13 +671,15 @@ function roadScene(): SceneDef {
 export const scene4State: {
   state: IntersectionState | null;
   transforms: Transform[];
-  lamps: { x: number; z: number }[];
+  lamps: { x: number; z: number; ns: boolean }[];
   handed: number;
+  closed: IntersectionConfig['closed'];
 } = {
   state: null,
   transforms: [],
   lamps: [],
   handed: 1,
+  closed: { n: 'open', e: 'open', s: 'open', w: 'open' },
 };
 
 function requireScene4(): IntersectionState {
@@ -702,39 +702,48 @@ function placeAt(road: Road, atS: number, target: { x: number; z: number; hx: nu
   };
 }
 
-/** Builds the intersection network and places every road around the zone. */
+/** Builds the intersection network and places every existing road around the zone. */
 export function buildScene4(cfg: IntersectionConfig, handed = 1): void {
   const state = buildIntersection(cfg, handed);
   const zh = state.zoneHalf;
   const L = cfg.approach;
   const edge = 4 * cfg.lanesEachWay + 1.2; // lamp offset from the approach centerline
   const outer = 4 * cfg.lanesEachWay - 2; // outer turn-lane offset
-  scene4State.state = state;
-  scene4State.transforms = [
-    placeAt(state.net.roads[IDX.s], L, { x: 0, z: -zh, hx: 0, hz: 1 }),
-    placeAt(state.net.roads[IDX.n], 0, { x: 0, z: zh, hx: 0, hz: 1 }),
-    placeAt(state.net.roads[IDX.e], 0, { x: zh, z: 0, hx: 1, hz: 0 }),
-    placeAt(state.net.roads[IDX.w], L, { x: -zh, z: 0, hx: 1, hz: 0 }),
-    placeAt(state.net.roads[IDX.nsConn], 0, { x: 0, z: -zh, hx: 0, hz: 1 }),
-    placeAt(state.net.roads[IDX.ewConn], 0, { x: -zh, z: 0, hx: 1, hz: 0 }),
-    // Turn arcs, pinned at their entry lane positions (mirrored with handedness).
-    placeAt(state.net.roads[ARC.sRight], 0, { x: -outer * handed, z: -zh, hx: 0, hz: 1 }),
-    placeAt(state.net.roads[ARC.sLeft], 0, { x: -2 * handed, z: -zh, hx: 0, hz: 1 }),
-    placeAt(state.net.roads[ARC.nRight], 0, { x: outer * handed, z: zh, hx: 0, hz: -1 }),
-    placeAt(state.net.roads[ARC.nLeft], 0, { x: 2 * handed, z: zh, hx: 0, hz: -1 }),
-    placeAt(state.net.roads[ARC.eRight], 0, { x: zh, z: -outer * handed, hx: -1, hz: 0 }),
-    placeAt(state.net.roads[ARC.eLeft], 0, { x: zh, z: -2 * handed, hx: -1, hz: 0 }),
-    placeAt(state.net.roads[ARC.wRight], 0, { x: -zh, z: outer * handed, hx: 1, hz: 0 }),
-    placeAt(state.net.roads[ARC.wLeft], 0, { x: -zh, z: 2 * handed, hx: 1, hz: 0 }),
-  ];
+  const ri = state.roadIndex;
+  const has = (key: string): boolean => ri[key] !== undefined;
+  const canEnter = (way: 'n' | 'e' | 's' | 'w'): boolean =>
+    cfg.closed[way] === 'open' || cfg.closed[way] === 'out';
+  const transforms: Transform[] = [];
+  const put = (key: string, road: Road, atS: number, target: { x: number; z: number; hx: number; hz: number }): void => {
+    if (has(key)) transforms[ri[key]] = placeAt(road, atS, target);
+  };
+  put('s', state.net.roads[ri.s], L, { x: 0, z: -zh, hx: 0, hz: 1 });
+  put('n', state.net.roads[ri.n], 0, { x: 0, z: zh, hx: 0, hz: 1 });
+  put('e', state.net.roads[ri.e], 0, { x: zh, z: 0, hx: 1, hz: 0 });
+  put('w', state.net.roads[ri.w], L, { x: -zh, z: 0, hx: 1, hz: 0 });
+  put('nsConn', state.net.roads[ri.nsConn], 0, { x: 0, z: -zh, hx: 0, hz: 1 });
+  put('ewConn', state.net.roads[ri.ewConn], 0, { x: -zh, z: 0, hx: 1, hz: 0 });
+  // Turn arcs, pinned at their entry lane positions (mirrored with handedness).
+  put('sRight', state.net.roads[ri.sRight], 0, { x: -outer * handed, z: -zh, hx: 0, hz: 1 });
+  put('sLeft', state.net.roads[ri.sLeft], 0, { x: -2 * handed, z: -zh, hx: 0, hz: 1 });
+  put('nRight', state.net.roads[ri.nRight], 0, { x: outer * handed, z: zh, hx: 0, hz: -1 });
+  put('nLeft', state.net.roads[ri.nLeft], 0, { x: 2 * handed, z: zh, hx: 0, hz: -1 });
+  put('eRight', state.net.roads[ri.eRight], 0, { x: zh, z: -outer * handed, hx: -1, hz: 0 });
+  put('eLeft', state.net.roads[ri.eLeft], 0, { x: zh, z: -2 * handed, hx: -1, hz: 0 });
+  put('wRight', state.net.roads[ri.wRight], 0, { x: -zh, z: outer * handed, hx: 1, hz: 0 });
+  put('wLeft', state.net.roads[ri.wLeft], 0, { x: -zh, z: 2 * handed, hx: 1, hz: 0 });
+
   // Lamp stacks on the right side of each entering approach, just before its stop line.
   scene4State.lamps = [
-    { x: -edge * handed, z: -zh - 1 }, // S
-    { x: edge * handed, z: zh + 1 }, // N
-    { x: zh + 1, z: -edge * handed }, // E
-    { x: -zh - 1, z: edge * handed }, // W
+    ...(canEnter('s') ? [{ x: -edge * handed, z: -zh - 1, ns: true }] : []),
+    ...(canEnter('n') ? [{ x: edge * handed, z: zh + 1, ns: true }] : []),
+    ...(canEnter('e') ? [{ x: zh + 1, z: -edge * handed, ns: false }] : []),
+    ...(canEnter('w') ? [{ x: -zh - 1, z: edge * handed, ns: false }] : []),
   ];
+  scene4State.state = state;
+  scene4State.transforms = transforms;
   scene4State.handed = handed;
+  scene4State.closed = cfg.closed;
 }
 
 function buildIntersectionStatic(palette: Palette): number[] {
@@ -745,34 +754,14 @@ function buildIntersectionStatic(palette: Palette): number[] {
   const G = 300;
   pushQuad(verts, [[-G, 0, -G], [-G, 0, G], [G, 0, G], [G, 0, -G]], palette.ground);
 
-  // The zone box sits 1 cm under everything; all roads (including connectors and turn
-  // arcs) draw their ribbons on top of it.
+  // The zone box sits 1 cm under everything; all existing roads draw ribbons on top.
   pushQuad(verts, [[-zh, 0.01, -zh], [-zh, 0.01, zh], [zh, 0.01, zh], [zh, 0.01, -zh]], palette.asphalt);
-  [
-    IDX.s,
-    IDX.n,
-    IDX.e,
-    IDX.w,
-    IDX.nsConn,
-    IDX.ewConn,
-    ARC.sRight,
-    ARC.sLeft,
-    ARC.nRight,
-    ARC.nLeft,
-    ARC.eRight,
-    ARC.eLeft,
-    ARC.wRight,
-    ARC.wLeft,
-  ].forEach((r) => {
-    verts.push(...buildRoadStatic(net.roads[r], palette, scene4State.transforms[r]));
+  net.roads.forEach((road, r) => {
+    verts.push(...buildRoadStatic(road, palette, scene4State.transforms[r]));
   });
 
-  // Stop lines on the entering lanes and zebra crossings at both ends of each connector.
+  // Stop lines + zebra crossings for ways that may enter the intersection.
   const paint: Vec3 = [0.9, 0.9, 0.9];
-  const lanes = net.roads[IDX.s].config.lanesForward;
-  const L = net.roads[IDX.s].length;
-  const oMin = -4 * lanes;
-  const oMax = 4 * lanes;
   const paint_patch = (
     road: Road,
     t: Transform,
@@ -784,27 +773,51 @@ function buildIntersectionStatic(palette: Palette): number[] {
   ): void => {
     pushPathPatch(verts, (s) => applyTransform(road.point(s), t), s0, s1, o0, o1, y, paint);
   };
-  const [tS, tN, tE, tW] = scene4State.transforms;
-  // Scene-1 layout at every approach: stop line first, then a 3.5 m zebra band across
-  // the full road width, ending just before the zone edge.
-  const stopS = L - STOP_BACK;
-  paint_patch(net.roads[IDX.s], tS, stopS - 0.125, stopS + 0.125, 0, oMax);
-  paint_patch(net.roads[IDX.w], tW, stopS - 0.125, stopS + 0.125, 0, oMax);
-  paint_patch(net.roads[IDX.n], tN, STOP_BACK - 0.125, STOP_BACK + 0.125, oMin, 0);
-  paint_patch(net.roads[IDX.e], tE, STOP_BACK - 0.125, STOP_BACK + 0.125, oMin, 0);
-  [IDX.s, IDX.w].forEach((r, i) => {
-    const t = i === 0 ? tS : tW;
+  const handed = scene4State.handed;
+  const stopSide = (a: number, b: number): [number, number] => (handed > 0 ? [a, b] : [-b, -a]);
+  const laneSpan = (o0: number, o1: number): [number, number] =>
+    o0 * handed < o1 * handed ? [o0 * handed, o1 * handed] : [o1 * handed, o0 * handed];
+  const paintApproach = (way: 'n' | 'e' | 's' | 'w'): void => {
+    const road = state.net.roads[state.roadIndex[way]];
+    const t = scene4State.transforms[state.roadIndex[way]];
+    const L = road.length;
+    const lanes = road.config.lanesForward;
+    const oMin = -4 * lanes;
+    const oMax = 4 * lanes;
+    const enteringFwd = way === 's' || way === 'w';
+    const stopS = enteringFwd ? L - STOP_BACK : STOP_BACK;
+    const wayState = scene4State.closed[way];
+
+    // Closed lanes are tinted light red (crosswalk stays): entering side for
+    // entry-closed ways, exiting side for exit-closed ways.
+    const closedSpan =
+      wayState === 'in'
+        ? enteringFwd
+          ? laneSpan(0, oMax)
+          : laneSpan(oMin, 0)
+        : wayState === 'out'
+          ? enteringFwd
+            ? laneSpan(oMin, 0)
+            : laneSpan(0, oMax)
+          : null;
+    if (closedSpan) {
+      pushPathPatch(verts, (s) => applyTransform(road.point(s), t), 0, L, closedSpan[0], closedSpan[1], 0.025, [0.72, 0.38, 0.38]);
+    }
+
+    // Stop line only where traffic may enter — right lanes for RHT, left for LHT.
+    if (wayState === 'open' || wayState === 'out') {
+      const [a, b] = enteringFwd ? stopSide(0, oMax) : stopSide(oMin, 0);
+      paint_patch(road, t, stopS - 0.125, stopS + 0.125, a, b);
+    }
+    // Scene-1 layout: a 3.5 m zebra band across the full road width after the line.
+    const [z0, z1] = enteringFwd ? [stopS + 0.8, stopS + 4.3] : [STOP_BACK - 4.3, STOP_BACK - 0.8];
     for (let k = 0; k < 8; k++) {
       const o0 = oMin + 0.4 + k * 1.0;
-      paint_patch(net.roads[r], t, stopS + 0.8, stopS + 4.3, o0, o0 + 0.5);
+      paint_patch(road, t, z0, z1, o0, o0 + 0.5);
     }
-  });
-  [IDX.n, IDX.e].forEach((r, i) => {
-    const t = i === 0 ? tN : tE;
-    for (let k = 0; k < 8; k++) {
-      const o0 = oMin + 0.4 + k * 1.0;
-      paint_patch(net.roads[r], t, STOP_BACK - 4.3, STOP_BACK - 0.8, o0, o0 + 0.5);
-    }
+  };
+  (['s', 'n', 'e', 'w'] as const).forEach((way) => {
+    if (state.roadIndex[way] !== undefined) paintApproach(way);
   });
   return verts;
 }
@@ -821,7 +834,8 @@ function intersectionScene(): SceneDef {
     carPose: (car) => networkCarPose(requireScene4().net, scene4State.transforms, car, scene4State.handed),
     phaseAt: (clock, light) => intersectionPhaseAt(clock, light),
     obstaclesFor: (phase) => intersectionObstacles(requireScene4(), phase as IntersectionPhase),
-    lampColor: (lamp, phase) => intersectionLampColor(requireScene4(), lamp, phase as IntersectionPhase),
+    lampColor: (lamp, phase) =>
+      intersectionLampColor(requireScene4(), scene4State.lamps[lamp].ns ? 0 : 2, phase as IntersectionPhase),
     step: (cars, params, carLength, dt, obstacles) => {
       const state = requireScene4();
       const yieldObstacles = leftTurnYieldObstacles(state, cars);

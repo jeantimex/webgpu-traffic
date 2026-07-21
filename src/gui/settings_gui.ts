@@ -50,7 +50,11 @@ export function setupGui(): GuiState {
       ],
       scene3: { shape: 'straight', length: 150, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 },
       scene3B: { shape: 'arc', length: 150, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 },
-      scene4: { approach: 80, lanesEachWay: 1 },
+      scene4: {
+        approach: 80,
+        lanesEachWay: 1,
+        closed: { n: 'open', e: 'open', s: 'open', w: 'open' },
+      },
     },
     telemetry: { speeds: {}, light: '' },
     selectedCar: 0,
@@ -99,6 +103,11 @@ export function setupGui(): GuiState {
   const intersectionFolder = gui.addFolder('Intersection (scene 4)');
   intersectionFolder.add(state.settings.scene4, 'approach', 40, 150, 10).name('Approach (m)');
   intersectionFolder.add(state.settings.scene4, 'lanesEachWay', 1, 2, 1).name('Lanes each way');
+  const wayOptions = { Open: 'open', 'Entry closed': 'in', 'Exit closed': 'out', 'Fully closed': 'both' };
+  (['n', 'e', 's', 'w'] as const).forEach((way) => {
+    const label = { n: 'top (A)', e: 'right (B)', s: 'bottom (C)', w: 'left (D)' }[way];
+    intersectionFolder.add(state.settings.scene4.closed, way, wayOptions).name(`Way ${label}`);
+  });
 
   const lightFolder = gui.addFolder('Traffic light');
   lightFolder

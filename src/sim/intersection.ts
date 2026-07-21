@@ -2,10 +2,8 @@
  * Intersection: a 4-way crossing of two two-way roads, built from the Road/Network
  * primitives. Four approach roads (S/N/E/W) meet two short connector roads (NS and
  * EW) inside the zone; links wire them end-to-start so cars flow straight through.
- * Right-of-way is a 2-phase signal with an all-red clearance: the stopped direction's
- * entries get a virtual standing car at their stop line.
- *
- * Road order in the network: [S, N, E, W, NS connector, EW connector].
+ * Each way can be open, entry-closed, exit-closed, or fully closed (not built);
+ * roads, connectors, turn arcs, signals, and spawns derive from those states.
  */
 import type { Car } from './idm';
 import {
@@ -13,18 +11,19 @@ import {
   globalLane,
   locate,
   ROUTE_LEFT,
-  ROUTE_RIGHT,
-  ROUTE_STRAIGHT,
-  type LaneConnection,
   type NetObstacle,
   type Network,
   type RoadLink,
 } from './network';
 import { Road } from './road';
 
+export type WayState = 'open' | 'in' | 'out' | 'both';
+
 export interface IntersectionConfig {
   approach: number; // m, length of each approach road
   lanesEachWay: number; // lanes per direction on every approach
+  /** Per way: open / entry closed / exit closed / fully closed (not built). */
+  closed: { n: WayState; e: WayState; s: WayState; w: WayState };
 }
 
 export interface IntersectionState {
@@ -32,28 +31,16 @@ export interface IntersectionState {
   zoneHalf: number; // half the zone's side length (m)
   /** Stop-line obstacles per direction group (global lane + s). */
   entries: { ns: NetObstacle[]; ew: NetObstacle[] };
-  /** Road indices. */
-  idx: { s: number; n: number; e: number; w: number; nsConn: number; ewConn: number };
+  /** Road indices by key: 's' | 'n' | 'e' | 'w' | 'nsConn' | 'ewConn' | 'sRight' | ... */
+  roadIndex: Record<string, number>;
   /** Opposing stream lanes per approach lane (for left-turn yield). */
   opposing: Map<number, number[]>;
 }
 
-export const IDX = { s: 0, n: 1, e: 2, w: 3, nsConn: 4, ewConn: 5 } as const;
-
-/** Turn-arc road indices: [approach][route]. */
-export const ARC = {
-  sRight: 6,
-  sLeft: 7,
-  nRight: 8,
-  nLeft: 9,
-  eRight: 10,
-  eLeft: 11,
-  wRight: 12,
-  wLeft: 13,
-} as const;
-
 /** Distance from the zone edge to the stop line (leaves room for the crosswalk after it). */
 export const STOP_BACK = 4.5;
+
+type Way = 'n' | 'e' | 's' | 'w';
 
 export function buildIntersection(cfg: IntersectionConfig, handed = 1): IntersectionState {
   const lanes = cfg.lanesEachWay;
@@ -76,109 +63,165 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
     return road;
   };
 
+  const built = (way: Way): boolean => cfg.closed[way] !== 'both';
+  const canEnter = (way: Way): boolean => cfg.closed[way] === 'open' || cfg.closed[way] === 'out';
+  const canExit = (way: Way): boolean => cfg.closed[way] === 'open' || cfg.closed[way] === 'in';
+  /** Travel direction into the zone for a way's entering lanes. */
+  const enteringDir = (way: Way): number => (way === 'n' || way === 'e' ? -1 : 1);
+
   const zoneHalf = 4 * lanes; // the zone is exactly as wide as the roads it joins
-  // Right turns hug the near corner, left turns swing wide — but with left-hand traffic
-  // the turn lanes sit on the far side, so the radii swap (exact for one lane each way).
+  const roadIndex: Record<string, number> = {};
+  const roads: Road[] = [];
+  const add = (key: string, road: Road): number => {
+    roadIndex[key] = roads.length;
+    roads.push(road);
+    return roadIndex[key];
+  };
+  const has = (key: string): boolean => roadIndex[key] !== undefined;
+
+  (['s', 'n', 'e', 'w'] as Way[]).forEach((way) => {
+    if (built(way)) add(way, mk(cfg.approach));
+  });
+  // Connectors carry straight flow both ways; build one when either direction can flow.
+  if ((canEnter('s') && canExit('n')) || (canEnter('n') && canExit('s'))) add('nsConn', mk(zoneHalf * 2));
+  if ((canEnter('w') && canExit('e')) || (canEnter('e') && canExit('w'))) add('ewConn', mk(zoneHalf * 2));
+
+  // Turn arcs: right turns hug the near corner, left turns swing wide — but with
+  // left-hand traffic the turn lanes sit on the far side, so the radii swap.
   const rRight = handed > 0 ? 2 : 6;
   const rLeft = handed > 0 ? 6 : 2;
-  const roads = [
-    ...[cfg.approach, cfg.approach, cfg.approach, cfg.approach].map(mk),
-    ...[zoneHalf * 2, zoneHalf * 2].map(mk),
-    mkArc(rRight, 90), // S right → W
-    mkArc(rLeft, -90), // S left → E
-    mkArc(rRight, 90), // N right → E
-    mkArc(rLeft, -90), // N left → W
-    mkArc(rRight, 90), // E right → S
-    mkArc(rLeft, -90), // E left → N
-    mkArc(rRight, 90), // W right → N
-    mkArc(rLeft, -90), // W left → S
+  const moves: { key: string; from: Way; to: Way; r: number; angle: number }[] = [
+    { key: 'sRight', from: 's', to: 'w', r: rRight, angle: 90 },
+    { key: 'sLeft', from: 's', to: 'e', r: rLeft, angle: -90 },
+    { key: 'nRight', from: 'n', to: 'e', r: rRight, angle: 90 },
+    { key: 'nLeft', from: 'n', to: 'w', r: rLeft, angle: -90 },
+    { key: 'eRight', from: 'e', to: 's', r: rRight, angle: 90 },
+    { key: 'eLeft', from: 'e', to: 'n', r: rLeft, angle: -90 },
+    { key: 'wRight', from: 'w', to: 'n', r: rRight, angle: 90 },
+    { key: 'wLeft', from: 'w', to: 's', r: rLeft, angle: -90 },
   ];
-  // Exit table: handedness-invariant (turn direction is heading-based; only lane
-  // positions, entry points, and radii change between RHT and LHT).
-  const exitLinks: RoadLink[] = [
-    [ARC.sRight, IDX.w, 1, 1],
-    [ARC.sLeft, IDX.e],
-    [ARC.nRight, IDX.e],
-    [ARC.nLeft, IDX.w, 1, 1],
-    [ARC.eRight, IDX.s, 1, 1],
-    [ARC.eLeft, IDX.n],
-    [ARC.wRight, IDX.n],
-    [ARC.wLeft, IDX.s, 1, 1],
-  ];
-  const links: RoadLink[] = [
-    // straight flow
-    [IDX.s, IDX.nsConn],
-    [IDX.nsConn, IDX.n],
-    [IDX.w, IDX.ewConn],
-    [IDX.ewConn, IDX.e],
-    // approach → turn arcs (S/W enter the zone from their end side, N/E from their start side)
-    [IDX.s, ARC.sRight],
-    [IDX.s, ARC.sLeft],
-    [IDX.n, ARC.nRight, 0, 0],
-    [IDX.n, ARC.nLeft, 0, 0],
-    [IDX.e, ARC.eRight, 0, 0],
-    [IDX.e, ARC.eLeft, 0, 0],
-    [IDX.w, ARC.wRight],
-    [IDX.w, ARC.wLeft],
-    ...exitLinks,
-  ];
+  for (const m of moves) {
+    if (canEnter(m.from) && canExit(m.to)) add(m.key, mkArc(m.r, m.angle));
+  }
+
+  const links: RoadLink[] = [];
+  if (has('s') && has('nsConn')) links.push([roadIndex.s, roadIndex.nsConn]);
+  if (has('nsConn') && has('n')) links.push([roadIndex.nsConn, roadIndex.n]);
+  if (has('w') && has('ewConn')) links.push([roadIndex.w, roadIndex.ewConn]);
+  if (has('ewConn') && has('e')) links.push([roadIndex.ewConn, roadIndex.e]);
+  for (const m of moves) {
+    // approach → arc (S/W enter from their end side, N/E from their start side)
+    if (has(m.from) && has(m.key)) links.push([roadIndex[m.from], roadIndex[m.key], enteringDir(m.from) > 0 ? 1 : 0, 0]);
+  }
+  for (const m of moves) {
+    if (has(m.key) && has(m.to)) links.push([roadIndex[m.key], roadIndex[m.to], 1, m.to === 'w' || m.to === 's' ? 1 : 0] as RoadLink);
+  }
   const net = buildNetwork(roads, links);
 
-  // Route connections per approach lane: right turns from the lane farthest from the
-  // yellow line, left turns from the lane closest to it; other lanes straight-only.
-  const approaches: { road: number; rightArc: number; leftArc: number }[] = [
-    { road: IDX.s, rightArc: ARC.sRight, leftArc: ARC.sLeft },
-    { road: IDX.n, rightArc: ARC.nRight, leftArc: ARC.nLeft },
-    { road: IDX.e, rightArc: ARC.eRight, leftArc: ARC.eLeft },
-    { road: IDX.w, rightArc: ARC.wRight, leftArc: ARC.wLeft },
-  ];
-  for (const { road: r, rightArc, leftArc } of approaches) {
+  // Exit-closed ways: nothing may flow into them.
+  for (const way of ['s', 'n', 'e', 'w'] as Way[]) {
+    if (!canExit(way) && has(way)) {
+      net.exit.forEach((roadExits) =>
+        roadExits.forEach((conns) => {
+          conns.forEach((conn, i) => {
+            if (conn && conn.toRoad === roadIndex[way]) conns[i] = null;
+          });
+        }),
+      );
+    }
+    // Entry-closed ways: entering lanes dead-end at the zone edge and take no spawns.
+    if (!canEnter(way) && has(way)) {
+      net.roads[roadIndex[way]].lanes.forEach((lane, li) => {
+        if (lane.direction === enteringDir(way)) {
+          net.exit[roadIndex[way]][li] = [];
+          net.closedLanes.add(globalLane(net, roadIndex[way], li));
+        }
+      });
+    }
+  }
+
+  // Route connections per approach lane, identified by target: the connector is the
+  // straight route (available only if it exits somewhere), turn arcs are right/left.
+  // Right turns from the lane farthest from the yellow line, left from the closest;
+  // others fall back to straight.
+  const connectorViable = (r: number, dir: number): boolean =>
+    net.roads[r].lanes.some(
+      (lane, li) => lane.direction === dir && net.exit[r][li].some((c) => c !== null),
+    );
+  for (const way of ['s', 'n', 'e', 'w'] as Way[]) {
+    if (!canEnter(way) || !has(way)) continue;
+    const r = roadIndex[way];
     net.roads[r].lanes.forEach((lane, li) => {
       const conns = net.exit[r][li];
       if (conns.length === 0) return; // lanes leaving the zone, not entering it
-      const straight = conns[0];
-      const right: LaneConnection = { toRoad: rightArc, toLane: 0, entranceS: 0 };
-      const left: LaneConnection = { toRoad: leftArc, toLane: 0, entranceS: 0 };
+      const found =
+        conns.find((c) => c !== null && (c.toRoad === roadIndex.nsConn || c.toRoad === roadIndex.ewConn)) ??
+        null;
+      // Straight is only a real route when the connector still exits somewhere; a
+      // closed far side means this approach must turn instead of stopping mid-zone.
+      const straight = found && connectorViable(found.toRoad, lane.direction) ? found : null;
+      const right = has(`${way}Right`)
+        ? conns.find((c) => c !== null && c.toRoad === roadIndex[`${way}Right`]) ?? null
+        : null;
+      const left = has(`${way}Left`)
+        ? conns.find((c) => c !== null && c.toRoad === roadIndex[`${way}Left`]) ?? null
+        : null;
       const forwardOuter = lane.direction > 0 && li === lanes - 1;
       const forwardInner = lane.direction > 0 && li === 0;
       const backwardOuter = lane.direction < 0 && li === net.roads[r].lanes.length - 1;
       const backwardInner = lane.direction < 0 && li === lanes;
-      conns[ROUTE_RIGHT] = forwardOuter || backwardOuter ? right : straight;
-      conns[ROUTE_LEFT] = forwardInner || backwardInner ? left : straight;
-      conns[ROUTE_STRAIGHT] = straight;
+      net.exit[r][li] = [
+        straight,
+        forwardOuter || backwardOuter ? (right ?? straight) : straight,
+        forwardInner || backwardInner ? (left ?? straight) : straight,
+      ];
     });
   }
 
-  // Signalized entries: lanes whose travel exits into the zone, stopping at their stop
-  // line (set back from the zone edge so the crosswalk fits after it).
+  // Signalized entries for ways that may enter.
   const ns: NetObstacle[] = [];
   const ew: NetObstacle[] = [];
-  roads[IDX.s].lanes.forEach((lane, li) => {
-    if (lane.direction > 0) ns.push({ lane: globalLane(net, IDX.s, li), s: cfg.approach - STOP_BACK });
-  });
-  roads[IDX.n].lanes.forEach((lane, li) => {
-    if (lane.direction < 0) ns.push({ lane: globalLane(net, IDX.n, li), s: STOP_BACK });
-  });
-  roads[IDX.w].lanes.forEach((lane, li) => {
-    if (lane.direction > 0) ew.push({ lane: globalLane(net, IDX.w, li), s: cfg.approach - STOP_BACK });
-  });
-  roads[IDX.e].lanes.forEach((lane, li) => {
-    if (lane.direction < 0) ew.push({ lane: globalLane(net, IDX.e, li), s: STOP_BACK });
-  });
-
-  // Opposing stream lanes per approach lane (used by left-turn yield).
-  const group = (road: number, dir: number): number[] =>
-    net.roads[road].lanes.flatMap((lane, li) => (lane.direction === dir ? [globalLane(net, road, li)] : []));
-  const opposing = new Map<number, number[]>();
-  for (const [a, b, conn] of [
-    [IDX.s, IDX.n, IDX.nsConn],
-    [IDX.w, IDX.e, IDX.ewConn],
-  ] as const) {
-    group(a, 1).forEach((g) => opposing.set(g, [...group(b, -1), ...group(conn, -1)]));
-    group(b, -1).forEach((g) => opposing.set(g, [...group(a, 1), ...group(conn, 1)]));
+  if (canEnter('s')) {
+    net.roads[roadIndex.s].lanes.forEach((lane, li) => {
+      if (lane.direction > 0) ns.push({ lane: globalLane(net, roadIndex.s, li), s: cfg.approach - STOP_BACK });
+    });
+  }
+  if (canEnter('n')) {
+    net.roads[roadIndex.n].lanes.forEach((lane, li) => {
+      if (lane.direction < 0) ns.push({ lane: globalLane(net, roadIndex.n, li), s: STOP_BACK });
+    });
+  }
+  if (canEnter('w')) {
+    net.roads[roadIndex.w].lanes.forEach((lane, li) => {
+      if (lane.direction > 0) ew.push({ lane: globalLane(net, roadIndex.w, li), s: cfg.approach - STOP_BACK });
+    });
+  }
+  if (canEnter('e')) {
+    net.roads[roadIndex.e].lanes.forEach((lane, li) => {
+      if (lane.direction < 0) ew.push({ lane: globalLane(net, roadIndex.e, li), s: STOP_BACK });
+    });
   }
 
-  return { net, zoneHalf, entries: { ns, ew }, idx: IDX, opposing };
+  // Opposing stream lanes per approach lane (used by left-turn yield).
+  const stream = (way: Way, dir: number): number[] =>
+    built(way) && canEnter(way)
+      ? net.roads[roadIndex[way]].lanes.flatMap((lane, li) =>
+          lane.direction === dir ? [globalLane(net, roadIndex[way], li)] : [],
+        )
+      : [];
+  const connStream = (conn: string, dir: number): number[] =>
+    has(conn)
+      ? net.roads[roadIndex[conn]].lanes.flatMap((lane, li) =>
+          lane.direction === dir ? [globalLane(net, roadIndex[conn], li)] : [],
+        )
+      : [];
+  const opposing = new Map<number, number[]>();
+  stream('s', 1).forEach((g) => opposing.set(g, [...stream('n', -1), ...connStream('nsConn', -1)]));
+  stream('n', -1).forEach((g) => opposing.set(g, [...stream('s', 1), ...connStream('nsConn', 1)]));
+  stream('w', 1).forEach((g) => opposing.set(g, [...stream('e', -1), ...connStream('ewConn', -1)]));
+  stream('e', -1).forEach((g) => opposing.set(g, [...stream('w', 1), ...connStream('ewConn', 1)]));
+
+  return { net, zoneHalf, entries: { ns, ew }, roadIndex, opposing };
 }
 
 export type IntersectionPhase = 'nsGreen' | 'nsYellow' | 'ewGreen' | 'ewYellow' | 'allRed';
