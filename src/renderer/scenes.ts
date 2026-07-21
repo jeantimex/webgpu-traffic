@@ -1,0 +1,371 @@
+import type { Car, Obstacle } from '../sim/idm';
+
+export type Vec3 = [number, number, number];
+
+export interface Palette {
+  sky: Vec3;
+  ground: Vec3;
+  asphalt: Vec3;
+  wall: Vec3;
+  ambient: number;
+  diffuse: number;
+}
+
+export const PALETTES: Record<'day' | 'night', Palette> = {
+  day: {
+    sky: [0.53, 0.75, 0.95],
+    ground: [0.32, 0.47, 0.25],
+    asphalt: [0.38, 0.39, 0.41],
+    wall: [0.3, 0.3, 0.32],
+    ambient: 0.55,
+    diffuse: 0.7,
+  },
+  night: {
+    sky: [0.05, 0.06, 0.09],
+    ground: [0.1, 0.12, 0.1],
+    asphalt: [0.24, 0.25, 0.27],
+    wall: [0.17, 0.17, 0.19],
+    ambient: 0.35,
+    diffuse: 0.65,
+  },
+};
+
+/** Everything the renderer needs from a scene: layout, geometry, and car placement. */
+export interface SceneDef {
+  c: number; // loop circumference (m)
+  obstacles: Obstacle[]; // stop lines, active while the light is not green
+  lamps: { x: number; z: number }[]; // signal pole positions
+  buildStatic(palette: Palette): number[];
+  /** World position, heading angle (around +Y), and pitch for a car. */
+  carPose(car: Car): { x: number; y: number; z: number; angle: number; pitch: number };
+}
+
+/** Appends a quad (6 vertices, interleaved position/normal/color). Corners must be CCW seen from outside. */
+export function pushQuad(out: number[], corners: [Vec3, Vec3, Vec3, Vec3], color: Vec3): void {
+  const [a, b, c, d] = corners;
+  const ux = b[0] - a[0];
+  const uy = b[1] - a[1];
+  const uz = b[2] - a[2];
+  const vx = c[0] - a[0];
+  const vy = c[1] - a[1];
+  const vz = c[2] - a[2];
+  const nx = uy * vz - uz * vy;
+  const ny = uz * vx - ux * vz;
+  const nz = ux * vy - uy * vx;
+  const len = Math.hypot(nx, ny, nz);
+  for (const p of [a, b, c, a, c, d]) {
+    out.push(p[0], p[1], p[2], nx / len, ny / len, nz / len, color[0], color[1], color[2]);
+  }
+}
+
+/** Appends a box (5 faces, bottom omitted: the camera stays above) to a vertex list. */
+export function pushBox(out: number[], min: Vec3, max: Vec3, color: Vec3): void {
+  const [x0, y0, z0] = min;
+  const [x1, y1, z1] = max;
+  pushQuad(out, [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], color); // top
+  pushQuad(out, [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], color); // +x
+  pushQuad(out, [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], color); // −x
+  pushQuad(out, [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], color); // +z
+  pushQuad(out, [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], color); // −z
+}
+
+// ---------------------------------------------------------------------------
+// Scene 1: the ring with a bridge.
+// ---------------------------------------------------------------------------
+
+const TRACK_RADIUS = 40;
+const ROAD_HALF_WIDTH = 4;
+const RING_C = 2 * Math.PI * TRACK_RADIUS;
+/** Arc position of the stop line / pedestrian crossing (quarter lap, nearest the camera). */
+const STOP_S = RING_C / 4;
+/** The signal hangs just inside the inner road edge at the stop line. */
+const RING_LAMP = {
+  x: (TRACK_RADIUS - ROAD_HALF_WIDTH - 1.2) * Math.cos(STOP_S / TRACK_RADIUS),
+  z: (TRACK_RADIUS - ROAD_HALF_WIDTH - 1.2) * Math.sin(STOP_S / TRACK_RADIUS),
+};
+
+/** The bridge is a raised-cosine bump on the far side of the ring (clear of the cars' start and the crossing). */
+const BRIDGE_LENGTH = 60; // m along the arc
+const BRIDGE_HEIGHT = 4; // m
+const BRIDGE_START = (3 * RING_C) / 4 - BRIDGE_LENGTH / 2;
+
+/** Road surface height above the ground at arc position s (0 off the bridge). */
+function roadHeight(s: number): number {
+  if (s < BRIDGE_START || s > BRIDGE_START + BRIDGE_LENGTH) return 0;
+  const u = (s - BRIDGE_START) / BRIDGE_LENGTH;
+  return (BRIDGE_HEIGHT / 2) * (1 - Math.cos(2 * Math.PI * u));
+}
+
+/** Slope (dh/ds) of the road at arc position s. */
+function roadGrade(s: number): number {
+  if (s < BRIDGE_START || s > BRIDGE_START + BRIDGE_LENGTH) return 0;
+  const u = (s - BRIDGE_START) / BRIDGE_LENGTH;
+  return ((BRIDGE_HEIGHT * Math.PI) / BRIDGE_LENGTH) * Math.sin(2 * Math.PI * u);
+}
+
+/** Appends a rectangular road patch covering arc [s0, s1] and radius [r0, r1]. */
+function pushRoadPatch(out: number[], s0: number, s1: number, r0: number, r1: number, color: Vec3): void {
+  // ponytail: a single straight quad per patch; over a few meters of arc it sags ~4 cm off the
+  // circle, invisible at this zoom. Segment along the arc if patches get much longer.
+  const at = (s: number, r: number): Vec3 => {
+    const theta = s / TRACK_RADIUS;
+    return [r * Math.cos(theta), 0.03, r * Math.sin(theta)];
+  };
+  pushQuad(out, [at(s0, r0), at(s1, r0), at(s1, r1), at(s0, r1)], color);
+}
+
+/** Appends a lane-divider dash centered between the two lanes, following the road height. */
+function pushLaneDash(out: number[], s0: number, s1: number, color: Vec3): void {
+  const r0 = TRACK_RADIUS - 0.075;
+  const r1 = TRACK_RADIUS + 0.075;
+  const at = (s: number, r: number): Vec3 => {
+    const theta = s / TRACK_RADIUS;
+    return [r * Math.cos(theta), 0.03 + roadHeight(s), r * Math.sin(theta)];
+  };
+  pushQuad(out, [at(s0, r0), at(s1, r0), at(s1, r1), at(s0, r1)], color);
+}
+
+/** Ground plane + ring road + crossing paint + light pole, vertex colors baked in. */
+function ringStatic(palette: Palette): number[] {
+  const verts: number[] = [];
+  const G = 300;
+  pushQuad(verts, [[-G, 0, -G], [-G, 0, G], [G, 0, G], [G, 0, -G]], palette.ground);
+
+  const asphalt = palette.asphalt;
+  const wall = palette.wall;
+  const inner = TRACK_RADIUS - ROAD_HALF_WIDTH;
+  const outer = TRACK_RADIUS + ROAD_HALF_WIDTH;
+  const SEGMENTS = 128;
+  for (let i = 0; i < SEGMENTS; i++) {
+    const t0 = (i / SEGMENTS) * 2 * Math.PI;
+    const t1 = ((i + 1) / SEGMENTS) * 2 * Math.PI;
+    const h0 = 0.02 + roadHeight(t0 * TRACK_RADIUS);
+    const h1 = 0.02 + roadHeight(t1 * TRACK_RADIUS);
+    pushQuad(
+      verts,
+      [
+        [inner * Math.cos(t0), h0, inner * Math.sin(t0)],
+        [inner * Math.cos(t1), h1, inner * Math.sin(t1)],
+        [outer * Math.cos(t1), h1, outer * Math.sin(t1)],
+        [outer * Math.cos(t0), h0, outer * Math.sin(t0)],
+      ],
+      asphalt,
+    );
+    // Side walls under the elevated section so the bridge reads as solid.
+    if (h0 > 0.05 || h1 > 0.05) {
+      pushQuad(
+        verts,
+        [
+          [outer * Math.cos(t0), 0, outer * Math.sin(t0)],
+          [outer * Math.cos(t0), h0, outer * Math.sin(t0)],
+          [outer * Math.cos(t1), h1, outer * Math.sin(t1)],
+          [outer * Math.cos(t1), 0, outer * Math.sin(t1)],
+        ],
+        wall,
+      );
+      pushQuad(
+        verts,
+        [
+          [inner * Math.cos(t0), h0, inner * Math.sin(t0)],
+          [inner * Math.cos(t0), 0, inner * Math.sin(t0)],
+          [inner * Math.cos(t1), 0, inner * Math.sin(t1)],
+          [inner * Math.cos(t1), h1, inner * Math.sin(t1)],
+        ],
+        wall,
+      );
+    }
+  }
+
+  // Solid stop line across the lane, then a zebra crossing after it: stripes run
+  // parallel to travel, packed across the lane width.
+  const paint: Vec3 = [0.9, 0.9, 0.9];
+  pushRoadPatch(verts, STOP_S - 0.125, STOP_S + 0.125, inner, outer, paint);
+  for (let i = 0; i < 7; i++) {
+    const r0 = inner + 0.6 + i * 1.0;
+    pushRoadPatch(verts, STOP_S + 0.8, STOP_S + 4.3, r0, r0 + 0.5, paint);
+  }
+
+  // Dashed divider between the lanes, skipping the crossing.
+  for (let s = 0; s < RING_C; s += 6) {
+    if (s > STOP_S - 2 && s < STOP_S + 6) continue;
+    pushLaneDash(verts, s, s + 2, paint);
+  }
+
+  // Traffic-light pole beside the road, tall enough for the three lamps.
+  pushBox(
+    verts,
+    [RING_LAMP.x - 0.1, 0, RING_LAMP.z - 0.1],
+    [RING_LAMP.x + 0.1, 4, RING_LAMP.z + 0.1],
+    [0.4, 0.4, 0.42],
+  );
+  return verts;
+}
+
+function ringScene(): SceneDef {
+  return {
+    c: RING_C,
+    obstacles: [{ s: STOP_S }],
+    lamps: [RING_LAMP],
+    buildStatic: ringStatic,
+    carPose(car) {
+      const theta = car.s / TRACK_RADIUS;
+      // Lane centers are 2 m either side of the track radius; lateral eases between them.
+      const r = TRACK_RADIUS - 2 + 4 * car.lateral;
+      // While sliding sideways, yaw the body along the actual velocity direction.
+      const yaw = Math.atan2(4 * car.lateralVel, Math.max(car.v, 1));
+      return {
+        x: r * Math.cos(theta),
+        y: 0.02 + roadHeight(car.s),
+        z: r * Math.sin(theta),
+        angle: -theta - Math.PI / 2 + yaw,
+        pitch: Math.atan(roadGrade(car.s)),
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Scene 2: a square loop, clockwise. 4 straights, 4 rounded corners, and a
+// stop line + zebra + traffic light at the end of each straight.
+// ---------------------------------------------------------------------------
+
+const SQ_STRAIGHT = 100; // m per side
+const SQ_CORNER_R = 8; // m, centerline corner radius
+const SQ_HALF = SQ_STRAIGHT / 2 + SQ_CORNER_R;
+const SQ_SEG = SQ_STRAIGHT + (Math.PI / 2) * SQ_CORNER_R;
+const SQ_C = 4 * SQ_SEG;
+/** Stop line arc offset within each side: 5 m before the corner. */
+const SQ_STOP_OFFSET = SQ_STRAIGHT - 5;
+
+// Clockwise sides: straight start point, heading h, and right normal r (toward the loop center).
+const SQ_SIDES = [
+  { ex: -SQ_STRAIGHT / 2, ez: -SQ_HALF, hx: 1, hz: 0, rx: 0, rz: 1 },
+  { ex: SQ_HALF, ez: -SQ_STRAIGHT / 2, hx: 0, hz: 1, rx: -1, rz: 0 },
+  { ex: SQ_STRAIGHT / 2, ez: SQ_HALF, hx: -1, hz: 0, rx: 0, rz: -1 },
+  { ex: -SQ_HALF, ez: SQ_STRAIGHT / 2, hx: 0, hz: -1, rx: 1, rz: 0 },
+];
+
+interface PathPoint {
+  x: number;
+  z: number;
+  hx: number; // heading (unit)
+  hz: number;
+  rx: number; // right normal (unit, toward the turn's center)
+  rz: number;
+}
+
+/** Centerline point + heading + right normal at arc position s on the square loop. */
+function squarePathPoint(s: number): PathPoint {
+  const wrapped = ((s % SQ_C) + SQ_C) % SQ_C;
+  const seg = Math.min(Math.floor(wrapped / SQ_SEG), 3);
+  const d = wrapped - seg * SQ_SEG;
+  const side = SQ_SIDES[seg];
+  if (d <= SQ_STRAIGHT) {
+    return {
+      x: side.ex + d * side.hx,
+      z: side.ez + d * side.hz,
+      hx: side.hx,
+      hz: side.hz,
+      rx: side.rx,
+      rz: side.rz,
+    };
+  }
+  // Rounded corner: quarter circle turning right, from heading h to heading r.
+  const phi = (d - SQ_STRAIGHT) / SQ_CORNER_R;
+  const ax = side.ex + SQ_STRAIGHT * side.hx;
+  const az = side.ez + SQ_STRAIGHT * side.hz;
+  const sin = Math.sin(phi);
+  const cos = Math.cos(phi);
+  return {
+    x: ax + SQ_CORNER_R * (sin * side.hx + (1 - cos) * side.rx),
+    z: az + SQ_CORNER_R * (sin * side.hz + (1 - cos) * side.rz),
+    hx: cos * side.hx + sin * side.rx,
+    hz: cos * side.hz + sin * side.rz,
+    rx: -sin * side.hx + cos * side.rx,
+    rz: -sin * side.hz + cos * side.rz,
+  };
+}
+
+/** Appends a path patch covering arc [s0, s1] and lateral offsets [o0, o1] (o+ = toward loop center). */
+function pushPathPatch(
+  out: number[],
+  s0: number,
+  s1: number,
+  o0: number,
+  o1: number,
+  y: number,
+  color: Vec3,
+): void {
+  const at = (s: number, o: number): Vec3 => {
+    const p = squarePathPoint(s);
+    return [p.x + p.rx * o, y, p.z + p.rz * o];
+  };
+  pushQuad(out, [at(s0, o1), at(s1, o1), at(s1, o0), at(s0, o0)], color);
+}
+
+const SQ_STOPS = [0, 1, 2, 3].map((k) => k * SQ_SEG + SQ_STOP_OFFSET);
+/** Poles just inside the inner road edge at each stop line. */
+const SQ_LAMPS = SQ_STOPS.map((s) => {
+  const p = squarePathPoint(s);
+  return {
+    x: p.x + p.rx * (ROAD_HALF_WIDTH + 1.2),
+    z: p.z + p.rz * (ROAD_HALF_WIDTH + 1.2),
+  };
+});
+
+function squareStatic(palette: Palette): number[] {
+  const verts: number[] = [];
+  const G = 300;
+  pushQuad(verts, [[-G, 0, -G], [-G, 0, G], [G, 0, G], [G, 0, -G]], palette.ground);
+
+  // Road ribbon, 1 m patches so the corner arcs are smooth.
+  for (let s = 0; s < SQ_C; s += 1) {
+    pushPathPatch(verts, s, Math.min(s + 1, SQ_C), -ROAD_HALF_WIDTH, ROAD_HALF_WIDTH, 0.02, palette.asphalt);
+  }
+
+  const paint: Vec3 = [0.9, 0.9, 0.9];
+  // Stop lines + zebra crossings (stripes parallel to travel) at every intersection.
+  for (const stop of SQ_STOPS) {
+    pushPathPatch(verts, stop - 0.125, stop + 0.125, -ROAD_HALF_WIDTH, ROAD_HALF_WIDTH, 0.03, paint);
+    for (let i = 0; i < 7; i++) {
+      const o0 = -ROAD_HALF_WIDTH + 0.6 + i * 1.0;
+      pushPathPatch(verts, stop + 0.8, stop + 4.3, o0, o0 + 0.5, 0.03, paint);
+    }
+  }
+
+  // Dashed lane divider, skipping the crossings.
+  for (let s = 0; s < SQ_C; s += 6) {
+    if (SQ_STOPS.some((stop) => s > stop - 2 && s < stop + 6)) continue;
+    pushPathPatch(verts, s, s + 2, -0.075, 0.075, 0.03, paint);
+  }
+
+  // Signal poles.
+  for (const lamp of SQ_LAMPS) {
+    pushBox(verts, [lamp.x - 0.1, 0, lamp.z - 0.1], [lamp.x + 0.1, 4, lamp.z + 0.1], [0.4, 0.4, 0.42]);
+  }
+  return verts;
+}
+
+function squareScene(): SceneDef {
+  return {
+    c: SQ_C,
+    obstacles: SQ_STOPS.map((s) => ({ s })),
+    lamps: SQ_LAMPS,
+    buildStatic: squareStatic,
+    carPose(car) {
+      const p = squarePathPoint(car.s);
+      // Lane centers are 2 m either side of the centerline (o+ = inner lane, toward the center).
+      const o = 2 * (1 - 2 * car.lateral);
+      const yaw = Math.atan2(4 * car.lateralVel, Math.max(car.v, 1));
+      return {
+        x: p.x + p.rx * o,
+        y: 0.02,
+        z: p.z + p.rz * o,
+        angle: Math.atan2(-p.hz, p.hx) + yaw,
+        pitch: 0,
+      };
+    },
+  };
+}
+
+export const SCENES: SceneDef[] = [ringScene(), squareScene()];

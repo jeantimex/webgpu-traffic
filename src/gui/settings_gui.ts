@@ -2,6 +2,7 @@ import GUI, { Controller } from 'lil-gui';
 import type { IdmParams } from '../sim/idm';
 
 export interface TrafficSettings {
+  scene: number;
   timeScale: number;
   carLength: number;
   dayMode: boolean;
@@ -29,6 +30,7 @@ export const carName = (i: number): string => `Car ${i + 1}`;
 export function setupGui(): GuiState {
   const state: GuiState = {
     settings: {
+      scene: 1,
       timeScale: 1,
       carLength: 4.5,
       dayMode: true,
@@ -46,6 +48,7 @@ export function setupGui(): GuiState {
   };
 
   const gui = new GUI({ title: 'Traffic' });
+  gui.add(state.settings, 'scene', { 'Scene 1 (ring)': 1, 'Scene 2 (square)': 2 }).name('Scene');
   gui.add(state.settings, 'timeScale', 0.1, 3, 0.1).name('Time scale');
   gui.add(state.settings, 'carLength', 3, 8, 0.5).name('Vehicle length (m)');
   gui.add(state.settings, 'dayMode').name('Daylight');

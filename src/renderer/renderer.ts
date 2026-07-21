@@ -3,6 +3,7 @@ import { B_SAFE, idmAcceleration, stepRing, type Car, type IdmParams, type Obsta
 import { identity, lookAt, multiply, perspective, rotationZ, translationRotationY } from '../utils/mat4';
 import { OrbitCamera } from '../utils/orbit';
 import { createBufferWithData, resizeCanvasToDisplaySize, type WebGPUState } from '../webgpu/utils';
+import { PALETTES, SCENES, pushBox, type Palette, type SceneDef, type Vec3 } from './scenes';
 
 const trafficShader = /* wgsl */ `
   struct Camera {
@@ -46,54 +47,20 @@ const trafficShader = /* wgsl */ `
   }
 `;
 
-const TRACK_RADIUS = 40;
-const ROAD_HALF_WIDTH = 4;
-const CIRCUMFERENCE = 2 * Math.PI * TRACK_RADIUS;
 /** Initial logical lanes: red/blue inner, yellow/white outer. Cars change lanes on their own. */
 const START_LANES = [0, 0, 1, 1];
+/** Start positions as fractions of the loop: each lane's pair begins half a lap apart. */
+const START_FRACTIONS = [0, 0.5, 0.25, 0.75];
 const SIM_STEP = 1 / 60;
 /** Byte stride between per-draw uniform slots (WebGPU dynamic-offset alignment). */
 const DRAW_STRIDE = 256;
 const FLOATS_PER_DRAW = DRAW_STRIDE / Float32Array.BYTES_PER_ELEMENT;
 /** Uniform slot of the first signal lamp: after 1 track slot + all car slots. */
 const LAMP_SLOT = 1 + MAX_CARS;
-/** Start arc positions: each lane's pair begins half a lap apart. */
-const START_S = [0, CIRCUMFERENCE / 2, CIRCUMFERENCE / 4, (3 * CIRCUMFERENCE) / 4];
-
-interface Palette {
-  sky: Vec3;
-  ground: Vec3;
-  asphalt: Vec3;
-  wall: Vec3;
-  ambient: number;
-  diffuse: number;
-}
-
-const PALETTES: Record<'day' | 'night', Palette> = {
-  day: {
-    sky: [0.53, 0.75, 0.95],
-    ground: [0.32, 0.47, 0.25],
-    asphalt: [0.38, 0.39, 0.41],
-    wall: [0.3, 0.3, 0.32],
-    ambient: 0.55,
-    diffuse: 0.7,
-  },
-  night: {
-    sky: [0.05, 0.06, 0.09],
-    ground: [0.1, 0.12, 0.1],
-    asphalt: [0.24, 0.25, 0.27],
-    wall: [0.17, 0.17, 0.19],
-    ambient: 0.35,
-    diffuse: 0.65,
-  },
-};
-/** Arc position of the stop line / pedestrian crossing (quarter lap, nearest the camera). */
-const STOP_S = CIRCUMFERENCE / 4;
-const RED_LIGHT: Obstacle[] = [{ s: STOP_S }];
+/** Total uniform slots: track + cars + up to 4 lights × 3 lamps. */
+const TOTAL_SLOTS = 1 + MAX_CARS + 12;
 const NO_OBSTACLES: Obstacle[] = [];
-/** The signal hangs just inside the inner road edge at the stop line. */
-const LAMP_X = (TRACK_RADIUS - ROAD_HALF_WIDTH - 1.2) * Math.cos(STOP_S / TRACK_RADIUS);
-const LAMP_Z = (TRACK_RADIUS - ROAD_HALF_WIDTH - 1.2) * Math.sin(STOP_S / TRACK_RADIUS);
+
 /** Red on top, yellow in the middle, green at the bottom. */
 const LAMP_HEIGHTS = { red: 3.2, yellow: 2.4, green: 1.6 } as const;
 const LAMP_COLORS: Record<LightPhase, Vec3> = {
@@ -108,154 +75,6 @@ type LightPhase = 'red' | 'yellow' | 'green';
 function lightPhase(clock: number, green: number, yellow: number, red: number): LightPhase {
   const t = clock % (green + yellow + red);
   return t < green ? 'green' : t < green + yellow ? 'yellow' : 'red';
-}
-
-/** The bridge is a raised-cosine bump on the far side of the ring (clear of the cars' start and the crossing). */
-const BRIDGE_LENGTH = 60; // m along the arc
-const BRIDGE_HEIGHT = 4; // m
-const BRIDGE_START = (3 * CIRCUMFERENCE) / 4 - BRIDGE_LENGTH / 2;
-
-/** Road surface height above the ground at arc position s (0 off the bridge). */
-function roadHeight(s: number): number {
-  if (s < BRIDGE_START || s > BRIDGE_START + BRIDGE_LENGTH) return 0;
-  const u = (s - BRIDGE_START) / BRIDGE_LENGTH;
-  return (BRIDGE_HEIGHT / 2) * (1 - Math.cos(2 * Math.PI * u));
-}
-
-/** Slope (dh/ds) of the road at arc position s. */
-function roadGrade(s: number): number {
-  if (s < BRIDGE_START || s > BRIDGE_START + BRIDGE_LENGTH) return 0;
-  const u = (s - BRIDGE_START) / BRIDGE_LENGTH;
-  return ((BRIDGE_HEIGHT * Math.PI) / BRIDGE_LENGTH) * Math.sin(2 * Math.PI * u);
-}
-
-type Vec3 = [number, number, number];
-
-/** Appends a quad (6 vertices, interleaved position/normal/color). Corners must be CCW seen from outside. */
-function pushQuad(out: number[], corners: [Vec3, Vec3, Vec3, Vec3], color: Vec3): void {
-  const [a, b, c, d] = corners;
-  const ux = b[0] - a[0];
-  const uy = b[1] - a[1];
-  const uz = b[2] - a[2];
-  const vx = c[0] - a[0];
-  const vy = c[1] - a[1];
-  const vz = c[2] - a[2];
-  const nx = uy * vz - uz * vy;
-  const ny = uz * vx - ux * vz;
-  const nz = ux * vy - uy * vx;
-  const len = Math.hypot(nx, ny, nz);
-  for (const p of [a, b, c, a, c, d]) {
-    out.push(p[0], p[1], p[2], nx / len, ny / len, nz / len, color[0], color[1], color[2]);
-  }
-}
-
-/** Appends a box (5 faces, bottom omitted: the camera stays above) to a vertex list. */
-function pushBox(out: number[], min: Vec3, max: Vec3, color: Vec3): void {
-  const [x0, y0, z0] = min;
-  const [x1, y1, z1] = max;
-  pushQuad(out, [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], color); // top
-  pushQuad(out, [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], color); // +x
-  pushQuad(out, [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], color); // −x
-  pushQuad(out, [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], color); // +z
-  pushQuad(out, [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], color); // −z
-}
-
-/** Appends a rectangular road patch covering arc [s0, s1] and radius [r0, r1]. */
-function pushRoadPatch(out: number[], s0: number, s1: number, r0: number, r1: number, color: Vec3): void {
-  // ponytail: a single straight quad per patch; over a few meters of arc it sags ~4 cm off the
-  // circle, invisible at this zoom. Segment along the arc if patches get much longer.
-  const at = (s: number, r: number): Vec3 => {
-    const theta = s / TRACK_RADIUS;
-    return [r * Math.cos(theta), 0.03, r * Math.sin(theta)];
-  };
-  pushQuad(out, [at(s0, r0), at(s1, r0), at(s1, r1), at(s0, r1)], color);
-}
-
-/** Appends a lane-divider dash centered between the two lanes, following the road height. */
-function pushLaneDash(out: number[], s0: number, s1: number, color: Vec3): void {
-  const r0 = TRACK_RADIUS - 0.075;
-  const r1 = TRACK_RADIUS + 0.075;
-  const at = (s: number, r: number): Vec3 => {
-    const theta = s / TRACK_RADIUS;
-    return [r * Math.cos(theta), 0.03 + roadHeight(s), r * Math.sin(theta)];
-  };
-  pushQuad(out, [at(s0, r0), at(s1, r0), at(s1, r1), at(s0, r1)], color);
-}
-
-/** Ground plane + ring road + crossing paint + light pole, vertex colors baked in. */
-function buildStaticMesh(palette: Palette): number[] {
-  const verts: number[] = [];
-  const G = 300;
-  pushQuad(verts, [[-G, 0, -G], [-G, 0, G], [G, 0, G], [G, 0, -G]], palette.ground);
-
-  const asphalt = palette.asphalt;
-  const wall = palette.wall;
-  const inner = TRACK_RADIUS - ROAD_HALF_WIDTH;
-  const outer = TRACK_RADIUS + ROAD_HALF_WIDTH;
-  const SEGMENTS = 128;
-  for (let i = 0; i < SEGMENTS; i++) {
-    const t0 = (i / SEGMENTS) * 2 * Math.PI;
-    const t1 = ((i + 1) / SEGMENTS) * 2 * Math.PI;
-    const h0 = 0.02 + roadHeight(t0 * TRACK_RADIUS);
-    const h1 = 0.02 + roadHeight(t1 * TRACK_RADIUS);
-    pushQuad(
-      verts,
-      [
-        [inner * Math.cos(t0), h0, inner * Math.sin(t0)],
-        [inner * Math.cos(t1), h1, inner * Math.sin(t1)],
-        [outer * Math.cos(t1), h1, outer * Math.sin(t1)],
-        [outer * Math.cos(t0), h0, outer * Math.sin(t0)],
-      ],
-      asphalt,
-    );
-    // Side walls under the elevated section so the bridge reads as solid.
-    if (h0 > 0.05 || h1 > 0.05) {
-      pushQuad(
-        verts,
-        [
-          [outer * Math.cos(t0), 0, outer * Math.sin(t0)],
-          [outer * Math.cos(t0), h0, outer * Math.sin(t0)],
-          [outer * Math.cos(t1), h1, outer * Math.sin(t1)],
-          [outer * Math.cos(t1), 0, outer * Math.sin(t1)],
-        ],
-        wall,
-      );
-      pushQuad(
-        verts,
-        [
-          [inner * Math.cos(t0), h0, inner * Math.sin(t0)],
-          [inner * Math.cos(t0), 0, inner * Math.sin(t0)],
-          [inner * Math.cos(t1), 0, inner * Math.sin(t1)],
-          [inner * Math.cos(t1), h1, inner * Math.sin(t1)],
-        ],
-        wall,
-      );
-    }
-  }
-
-  // Solid stop line across the lane, then a zebra crossing after it: stripes run
-  // parallel to travel, packed across the lane width.
-  const paint: Vec3 = [0.9, 0.9, 0.9];
-  pushRoadPatch(verts, STOP_S - 0.125, STOP_S + 0.125, inner, outer, paint);
-  for (let i = 0; i < 7; i++) {
-    const r0 = inner + 0.6 + i * 1.0;
-    pushRoadPatch(verts, STOP_S + 0.8, STOP_S + 4.3, r0, r0 + 0.5, paint);
-  }
-
-  // Dashed divider between the lanes, skipping the crossing.
-  for (let s = 0; s < CIRCUMFERENCE; s += 6) {
-    if (s > STOP_S - 2 && s < STOP_S + 6) continue;
-    pushLaneDash(verts, s, s + 2, paint);
-  }
-
-  // Traffic-light pole beside the road, tall enough for the three lamps.
-  pushBox(
-    verts,
-    [LAMP_X - 0.1, 0, LAMP_Z - 0.1],
-    [LAMP_X + 0.1, 4, LAMP_Z + 0.1],
-    [0.4, 0.4, 0.42],
-  );
-  return verts;
 }
 
 /** A car-shaped box, white so the per-draw tint shows through. */
@@ -276,18 +95,22 @@ export class Renderer {
   private readonly device: GPUDevice;
   private readonly context: GPUCanvasContext;
   private readonly format: GPUTextureFormat;
-  private readonly vertexBuffer: GPUBuffer;
+  private vertexBuffer: GPUBuffer;
   private readonly cameraBuffer: GPUBuffer;
   private readonly drawBuffer: GPUBuffer;
   private readonly pipeline: GPURenderPipeline;
   private readonly bindGroup: GPUBindGroup;
-  private readonly staticVertexCount: number;
-  private readonly carFirstVertex: number;
   private readonly carVertexCount: number;
   private readonly lampFirstVertex: number;
   private readonly lampVertexCount: number;
-  private cars: Car[];
-  private carParams: IdmParams[];
+  private readonly staticFirstVertex: number;
+  private staticVertexCount: number;
+  private carVerts: number[];
+  private readonly lampVerts: number[];
+  private cars: Car[] = [];
+  private carParams: IdmParams[] = [];
+  private def: SceneDef;
+  private scene: number;
   private builtCarLength: number;
   private builtDayMode: boolean;
   private lightClock = 0;
@@ -307,18 +130,23 @@ export class Renderer {
     this.context = gpu.context;
     this.format = gpu.format;
 
-    const staticVerts = buildStaticMesh(this.palette());
-    const carVerts = buildCarMesh(this.gui.settings.carLength);
-    const lampVerts = buildLampMesh();
+    this.scene = gui.settings.scene;
+    this.def = SCENES[this.scene - 1];
+
+    // Vertex layout: [car mesh][lamp mesh][static scene mesh] — car/lamp offsets are
+    // fixed so the static part can be rebuilt (palette or scene switch) independently.
+    this.carVerts = buildCarMesh(this.gui.settings.carLength);
+    this.lampVerts = buildLampMesh();
+    this.carVertexCount = this.carVerts.length / 9;
+    this.lampFirstVertex = this.carVertexCount;
+    this.lampVertexCount = this.lampVerts.length / 9;
+    this.staticFirstVertex = this.lampFirstVertex + this.lampVertexCount;
+    const staticVerts = this.def.buildStatic(this.palette());
     this.staticVertexCount = staticVerts.length / 9;
-    this.carFirstVertex = this.staticVertexCount;
-    this.carVertexCount = carVerts.length / 9;
-    this.lampFirstVertex = this.carFirstVertex + this.carVertexCount;
-    this.lampVertexCount = lampVerts.length / 9;
     this.vertexBuffer = createBufferWithData(
       this.device,
       'scene vertices',
-      new Float32Array([...staticVerts, ...carVerts, ...lampVerts]),
+      new Float32Array([...this.carVerts, ...this.lampVerts, ...staticVerts]),
       GPUBufferUsage.VERTEX,
     );
 
@@ -329,8 +157,7 @@ export class Renderer {
     });
     this.drawBuffer = this.device.createBuffer({
       label: 'per-draw uniforms',
-      // 1 track + MAX_CARS car slots + 3 lamps
-      size: DRAW_STRIDE * (4 + MAX_CARS),
+      size: DRAW_STRIDE * TOTAL_SLOTS,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -384,19 +211,7 @@ export class Renderer {
       ],
     });
 
-    // Cars start at their desired speed, each lane's pair half a lap apart.
-    this.cars = this.gui.settings.cars.map((params, i) => ({
-      s: START_S[i % START_S.length],
-      v: params.v0,
-      a: 0,
-      lane: START_LANES[i % START_LANES.length],
-      lateral: START_LANES[i % START_LANES.length],
-      lateralVel: 0,
-      laneFrom: START_LANES[i % START_LANES.length],
-      laneProgress: 1,
-      cooldown: 0,
-    }));
-    this.carParams = [...this.gui.settings.cars];
+    this.resetCars();
     this.builtCarLength = this.gui.settings.carLength;
     this.builtDayMode = this.gui.settings.dayMode;
     this.orbit = new OrbitCamera(canvas);
@@ -405,6 +220,20 @@ export class Renderer {
   start(): void {
     if (this.animationFrame !== undefined) return;
     this.animationFrame = requestAnimationFrame(this.render);
+  }
+
+  stop(): void {
+    if (this.animationFrame === undefined) return;
+    cancelAnimationFrame(this.animationFrame);
+    this.animationFrame = undefined;
+  }
+
+  destroy(): void {
+    this.stop();
+    this.depthTexture?.destroy();
+    this.vertexBuffer.destroy();
+    this.cameraBuffer.destroy();
+    this.drawBuffer.destroy();
   }
 
   private palette(): Palette {
@@ -417,18 +246,53 @@ export class Renderer {
     return override === 'auto' ? lightPhase(this.lightClock, green, yellow, red) : override;
   }
 
+  /** Switches the active scene: rebuilds the static mesh and restarts traffic. */
+  private applyScene(scene: number): void {
+    this.scene = scene;
+    this.def = SCENES[scene - 1];
+    const staticVerts = this.def.buildStatic(this.palette());
+    this.staticVertexCount = staticVerts.length / 9;
+    this.vertexBuffer.destroy();
+    this.vertexBuffer = createBufferWithData(
+      this.device,
+      'scene vertices',
+      new Float32Array([...this.carVerts, ...this.lampVerts, ...staticVerts]),
+      GPUBufferUsage.VERTEX,
+    );
+    this.resetCars();
+    this.lightClock = 0;
+  }
+
+  /** Places all cars at their start positions for the current scene. */
+  private resetCars(): void {
+    const c = this.def.c;
+    this.cars = this.gui.settings.cars.map((params, i) => ({
+      s: START_FRACTIONS[i % START_FRACTIONS.length] * c,
+      v: params.v0,
+      a: 0,
+      lane: START_LANES[i % START_LANES.length],
+      lateral: START_LANES[i % START_LANES.length],
+      lateralVel: 0,
+      laneFrom: START_LANES[i % START_LANES.length],
+      laneProgress: 1,
+      cooldown: 0,
+    }));
+    this.carParams = [...this.gui.settings.cars];
+  }
+
   /**
    * Best safe spawn slot for a car with `params`, or null when the road is too full.
    * Safe = neither the new car nor its lane follower would brake harder than B_SAFE.
    * A car mid-lane-change counts as occupying both lanes.
    */
   private findSpawnSlot(params: IdmParams): { s: number; lane: number } | null {
+    const c = this.def.c;
     const carLength = this.gui.settings.carLength;
     let best: { s: number; lane: number } | null = null;
     let bestScore = -Infinity;
     for (let lane = 0; lane <= 1; lane++) {
       for (let k = 0; k < 32; k++) {
-        const s = (k * CIRCUMFERENCE) / 32;
+        const s = (k * c) / 32;
         let leaderGap = Infinity;
         let leaderV = params.v0;
         let followerGap = Infinity;
@@ -436,12 +300,12 @@ export class Renderer {
         let followerParams: IdmParams | null = null;
         this.cars.forEach((car, j) => {
           if (car.lane !== lane && car.laneProgress >= 1) return;
-          const fwd = (((car.s - s) % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE;
+          const fwd = (((car.s - s) % c) + c) % c;
           if (fwd < leaderGap) {
             leaderGap = fwd;
             leaderV = car.v;
           }
-          const back = (CIRCUMFERENCE - fwd) % CIRCUMFERENCE;
+          const back = (c - fwd) % c;
           if (back < followerGap) {
             followerGap = back;
             followerV = car.v;
@@ -466,7 +330,7 @@ export class Renderer {
     return best;
   }
 
-  /** Spawns a car in the best safe slot (falls back to the ring start; the Add button prevents this). */
+  /** Spawns a car in the best safe slot (falls back to the loop start; the Add button prevents this). */
   private spawnCar(params: IdmParams): Car {
     const slot = this.findSpawnSlot(params) ?? { s: 0, lane: 0 };
     return {
@@ -500,33 +364,19 @@ export class Renderer {
 
   /** Bumper gap to the nearest car ahead in the same lane, or null when alone in the lane. */
   private leaderGap(i: number): number | null {
+    const c = this.def.c;
     const car = this.cars[i];
     let gap = Infinity;
     for (let j = 0; j < this.cars.length; j++) {
       if (j === i || this.cars[j].lane !== car.lane) continue;
-      gap = Math.min(
-        gap,
-        (((this.cars[j].s - car.s) % CIRCUMFERENCE) + CIRCUMFERENCE) % CIRCUMFERENCE,
-      );
+      gap = Math.min(gap, (((this.cars[j].s - car.s) % c) + c) % c);
     }
     return Number.isFinite(gap) ? gap - this.gui.settings.carLength : null;
   }
 
-  stop(): void {
-    if (this.animationFrame === undefined) return;
-    cancelAnimationFrame(this.animationFrame);
-    this.animationFrame = undefined;
-  }
-
-  destroy(): void {
-    this.stop();
-    this.depthTexture?.destroy();
-    this.vertexBuffer.destroy();
-    this.cameraBuffer.destroy();
-    this.drawBuffer.destroy();
-  }
-
   private readonly render = (now: number): void => {
+    if (this.gui.settings.scene !== this.scene) this.applyScene(this.gui.settings.scene);
+
     const resized = resizeCanvasToDisplaySize(this.canvas, this.device.limits.maxTextureDimension2D);
     if (resized || !this.configured) {
       this.context.configure({
@@ -559,10 +409,10 @@ export class Renderer {
       stepRing(
         this.cars,
         this.gui.settings.cars,
-        CIRCUMFERENCE,
+        this.def.c,
         this.gui.settings.carLength,
         SIM_STEP,
-        clear ? NO_OBSTACLES : RED_LIGHT,
+        clear ? NO_OBSTACLES : this.def.obstacles,
       );
       this.accumulator -= SIM_STEP;
     }
@@ -572,18 +422,19 @@ export class Renderer {
     // Vehicle length is baked into the car mesh; rebuild it in place when the slider moves.
     if (this.gui.settings.carLength !== this.builtCarLength) {
       this.builtCarLength = this.gui.settings.carLength;
-      this.device.queue.writeBuffer(
-        this.vertexBuffer,
-        this.carFirstVertex * 9 * Float32Array.BYTES_PER_ELEMENT,
-        new Float32Array(buildCarMesh(this.builtCarLength)),
-      );
+      this.carVerts = buildCarMesh(this.builtCarLength);
+      this.device.queue.writeBuffer(this.vertexBuffer, 0, new Float32Array(this.carVerts));
     }
 
     // Ground/asphalt colors are baked into the static mesh; rebuild it on a day/night switch.
     const palette = this.palette();
     if (this.gui.settings.dayMode !== this.builtDayMode) {
       this.builtDayMode = this.gui.settings.dayMode;
-      this.device.queue.writeBuffer(this.vertexBuffer, 0, new Float32Array(buildStaticMesh(palette)));
+      this.device.queue.writeBuffer(
+        this.vertexBuffer,
+        this.staticFirstVertex * 9 * Float32Array.BYTES_PER_ELEMENT,
+        new Float32Array(this.def.buildStatic(palette)),
+      );
     }
     this.cars.forEach((car, i) => {
       const gap = this.leaderGap(i);
@@ -604,28 +455,17 @@ export class Renderer {
       new Float32Array([palette.ambient, palette.diffuse, 0, 0]),
     );
 
-    // Uniform slot 0: static track. Slots 1..N: the cars. Slots LAMP_SLOT..: red/yellow/green lamps.
-    const drawData = new Float32Array(FLOATS_PER_DRAW * (4 + MAX_CARS));
+    // Uniform slot 0: static scene. Slots 1..N: the cars. Slots LAMP_SLOT..: the signal lamps.
+    const drawData = new Float32Array(FLOATS_PER_DRAW * TOTAL_SLOTS);
     drawData.set(identity(), 0);
     drawData.set([1, 1, 1, 1], 16);
     this.cars.forEach((car, i) => {
-      const theta = car.s / TRACK_RADIUS;
-      // Lane centers are 2 m either side of the track radius; lateral eases between them.
-      const r = TRACK_RADIUS - 2 + 4 * car.lateral;
-      // While sliding sideways, yaw the body along the actual velocity direction.
-      // lateralVel is cosine-eased by the sim, so the yaw eases in and out too.
-      const lateralSpeed = 4 * car.lateralVel; // m/s (lane centers are 4 m apart)
-      const yaw = Math.atan2(lateralSpeed, Math.max(car.v, 1));
+      const pose = this.def.carPose(car);
       const offset = FLOATS_PER_DRAW * (i + 1);
       drawData.set(
         multiply(
-          translationRotationY(
-            r * Math.cos(theta),
-            0.02 + roadHeight(car.s),
-            r * Math.sin(theta),
-            -theta - Math.PI / 2 + yaw,
-          ),
-          rotationZ(Math.atan(roadGrade(car.s))),
+          translationRotationY(pose.x, pose.y, pose.z, pose.angle),
+          rotationZ(pose.pitch),
         ),
         offset,
       );
@@ -638,11 +478,13 @@ export class Renderer {
             : [0.9, 0.9, 0.9];
       drawData.set([...rgb, 1], offset + 16);
     });
-    (['red', 'yellow', 'green'] as const).forEach((lamp, i) => {
-      const offset = FLOATS_PER_DRAW * (LAMP_SLOT + i);
-      const scale = phase === lamp ? 1 : INACTIVE_LAMP_DIM;
-      drawData.set(translationRotationY(LAMP_X, LAMP_HEIGHTS[lamp], LAMP_Z, 0), offset);
-      drawData.set([...LAMP_COLORS[lamp].map((c) => c * scale), 1] as number[], offset + 16);
+    this.def.lamps.forEach((pos, li) => {
+      (['red', 'yellow', 'green'] as const).forEach((lamp, ci) => {
+        const offset = FLOATS_PER_DRAW * (LAMP_SLOT + li * 3 + ci);
+        const scale = phase === lamp ? 1 : INACTIVE_LAMP_DIM;
+        drawData.set(translationRotationY(pos.x, LAMP_HEIGHTS[lamp], pos.z, 0), offset);
+        drawData.set([...LAMP_COLORS[lamp].map((c) => c * scale), 1] as number[], offset + 16);
+      });
     });
     this.device.queue.writeBuffer(this.drawBuffer, 0, drawData);
 
@@ -666,12 +508,12 @@ export class Renderer {
     pass.setPipeline(this.pipeline);
     pass.setVertexBuffer(0, this.vertexBuffer);
     pass.setBindGroup(0, this.bindGroup, [0]);
-    pass.draw(this.staticVertexCount);
+    pass.draw(this.staticVertexCount, 1, this.staticFirstVertex);
     this.cars.forEach((_, i) => {
       pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * (i + 1)]);
-      pass.draw(this.carVertexCount, 1, this.carFirstVertex);
+      pass.draw(this.carVertexCount, 1, 0);
     });
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < this.def.lamps.length * 3; i++) {
       pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * (LAMP_SLOT + i)]);
       pass.draw(this.lampVertexCount, 1, this.lampFirstVertex);
     }
