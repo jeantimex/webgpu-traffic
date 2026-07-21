@@ -217,7 +217,7 @@ export class Renderer {
       ],
     });
 
-    this.resetCars(false);
+    this.resetCars();
     this.builtCarLength = this.gui.settings.carLength;
     this.builtDayMode = this.gui.settings.dayMode;
     this.orbit = new OrbitCamera(canvas);
@@ -253,7 +253,7 @@ export class Renderer {
   }
 
   /** Switches the active scene: rebuilds the static mesh and restarts traffic. */
-  private applyScene(scene: number, preserveCars = false): void {
+  private applyScene(scene: number): void {
     this.scene = scene;
     if (scene === 3) {
       scene3State.road = new Road(this.gui.settings.scene3);
@@ -269,46 +269,31 @@ export class Renderer {
       new Float32Array([...this.carVerts, ...this.lampVerts, ...staticVerts]),
       GPUBufferUsage.VERTEX,
     );
-    this.resetCars(preserveCars);
+    this.resetCars();
     this.lightClock = 0;
   }
 
   /**
-   * Places all cars for the current scene. Fresh scenes deal cars round-robin; a scene-3
-   * config rebuild preserves each car's lane/position/speed instead (clamped to what
-   * still exists), so adding a lane doesn't scatter traffic.
+   * Places all cars for the current scene. Ring scenes deal fixed pairs per lane;
+   * scene 3 deals round-robin over every lane, so a freshly enabled backward
+   * direction immediately gets opposing traffic.
    */
-  private resetCars(preserve: boolean): void {
+  private resetCars(): void {
     const c = this.def.c;
     const numLanes = this.scene === 3 ? (scene3State.road?.lanes.length ?? 1) : 2;
     const laneFor = (i: number): number =>
       this.scene === 3 ? i % numLanes : START_LANES[i % START_LANES.length] % numLanes;
-    this.cars = this.gui.settings.cars.map((params, i) => {
-      const prev = preserve && this.carParams[i] === params ? this.cars[i] : undefined;
-      if (prev) {
-        const lane = Math.min(prev.lane, numLanes - 1);
-        return {
-          ...prev,
-          s: Math.min(prev.s, c),
-          lane,
-          lateral: lane,
-          lateralVel: 0,
-          laneFrom: lane,
-          laneProgress: 1,
-        };
-      }
-      return {
-        s: START_FRACTIONS[i % START_FRACTIONS.length] * c,
-        v: params.v0,
-        a: 0,
-        lane: laneFor(i),
-        lateral: laneFor(i),
-        lateralVel: 0,
-        laneFrom: laneFor(i),
-        laneProgress: 1,
-        cooldown: 0,
-      };
-    });
+    this.cars = this.gui.settings.cars.map((params, i) => ({
+      s: START_FRACTIONS[i % START_FRACTIONS.length] * c,
+      v: params.v0,
+      a: 0,
+      lane: laneFor(i),
+      lateral: laneFor(i),
+      lateralVel: 0,
+      laneFrom: laneFor(i),
+      laneProgress: 1,
+      cooldown: 0,
+    }));
     this.carParams = [...this.gui.settings.cars];
   }
 
@@ -350,10 +335,10 @@ export class Renderer {
 
   private readonly render = (now: number): void => {
     if (this.gui.settings.scene !== this.scene) this.applyScene(this.gui.settings.scene);
-    // Scene 3's road is user-configurable: rebuild it on any change, keeping car state.
+    // Scene 3's road is user-configurable: any change clears traffic and re-deals fresh cars.
     if (this.scene === 3) {
       const key = JSON.stringify(this.gui.settings.scene3);
-      if (key !== this.roadKey) this.applyScene(3, true);
+      if (key !== this.roadKey) this.applyScene(3);
     }
 
     const resized = resizeCanvasToDisplaySize(this.canvas, this.device.limits.maxTextureDimension2D);
