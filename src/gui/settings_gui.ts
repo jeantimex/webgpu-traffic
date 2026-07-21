@@ -20,6 +20,9 @@ export interface GuiState {
 /** Default IDM params for an added car (copied on add). */
 export const NEW_CAR_PARAMS: IdmParams = { v0: 20, T: 1.5, a: 2.0, b: 2.5, s0: 2, delta: 4 };
 
+/** Hard cap on cars (the renderer preallocates this many uniform slots). */
+export const MAX_CARS = 16;
+
 export const carName = (i: number): string => `Car ${i + 1}`;
 
 /** Creates the settings panel and returns its live values. */
@@ -93,7 +96,7 @@ export function setupGui(): GuiState {
     .add(
       {
         addCar: () => {
-          if (!state.canSpawn) return;
+          if (!state.canSpawn || state.settings.cars.length >= MAX_CARS) return;
           state.settings.cars.push({ ...NEW_CAR_PARAMS });
           state.selectedCar = state.settings.cars.length - 1;
           refreshCarPanel();
@@ -102,8 +105,11 @@ export function setupGui(): GuiState {
       'addCar',
     )
     .name('Add car');
-  // The renderer knows the traffic; poll its verdict on whether a safe spawn slot exists.
-  setInterval(() => addController.disable(!state.canSpawn), 250);
+  // Disabled when the renderer reports no safe spawn slot, or the car cap is reached.
+  setInterval(
+    () => addController.disable(!state.canSpawn || state.settings.cars.length >= MAX_CARS),
+    250,
+  );
   carFolder
     .add(
       {

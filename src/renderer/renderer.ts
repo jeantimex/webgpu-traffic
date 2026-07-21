@@ -1,4 +1,4 @@
-import { NEW_CAR_PARAMS, type GuiState } from '../gui/settings_gui';
+import { MAX_CARS, NEW_CAR_PARAMS, type GuiState } from '../gui/settings_gui';
 import { B_SAFE, idmAcceleration, stepRing, type Car, type IdmParams, type Obstacle } from '../sim/idm';
 import { identity, lookAt, multiply, perspective, rotationZ, translationRotationY } from '../utils/mat4';
 import { OrbitCamera } from '../utils/orbit';
@@ -55,8 +55,6 @@ const SIM_STEP = 1 / 60;
 /** Byte stride between per-draw uniform slots (WebGPU dynamic-offset alignment). */
 const DRAW_STRIDE = 256;
 const FLOATS_PER_DRAW = DRAW_STRIDE / Float32Array.BYTES_PER_ELEMENT;
-/** Uniform slots are preallocated for this many cars; adding beyond it is a no-op. */
-const MAX_CARS = 16;
 /** Uniform slot of the first signal lamp: after 1 track slot + all car slots. */
 const LAMP_SLOT = 1 + MAX_CARS;
 /** Start arc positions: each lane's pair begins half a lap apart. */
