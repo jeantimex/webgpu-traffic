@@ -312,7 +312,7 @@ const signalWithYield = (state: IntersectionState, cars: Car[]): NetObstacle[] =
   for (let step = 0; step < 20 * 60; step++) {
     stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, signalWithYield(state, car));
   }
-  assert(locate(state.net, car[0].lane).road === IDX.e, `S car turned right onto E (road ${locate(state.net, car[0].lane).road})`);
+  assert(locate(state.net, car[0].lane).road === IDX.w, `S car turned right onto W (road ${locate(state.net, car[0].lane).road})`);
 }
 
 // Right turn does NOT yield to opposing traffic.
@@ -339,54 +339,70 @@ const signalWithYield = (state: IntersectionState, cars: Car[]): NetObstacle[] =
   for (let step = 0; step < 28 * 60; step++) {
     stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
   }
-  assert(locate(state.net, cars[0].lane).road === IDX.w, `S car turned left onto W after yielding (road ${locate(state.net, cars[0].lane).road})`);
+  assert(locate(state.net, cars[0].lane).road === IDX.e, `S car turned left onto E after yielding (road ${locate(state.net, cars[0].lane).road})`);
 }
 
 console.log('Turn checks passed');
 
 // ---------------------------------------------------------------------------
-// Turn-arc geometry: every arc's end pose must land on its exit lane (the bug the
-// topology checks could not see).
+// Turn-arc geometry: every arc's end pose must land on its exit lane, for both
+// driving sides (the bug the topology checks could not see).
 // ---------------------------------------------------------------------------
 {
-  buildScene4({ approach: 80, lanesEachWay: 1 });
-  const def = SCENES[3];
-  const net = scene4State.state!.net;
-  const expected: [number, number, number, number][] = [
-    [4, -2, 1, 0], // S right → E
-    [-4, 2, -1, 0], // S left → W
-    [-4, 2, -1, 0], // N right → W
-    [4, -2, 1, 0], // N left → E
-    [2, 4, 0, 1], // E right → N
-    [-2, -4, 0, -1], // E left → S
-    [-2, -4, 0, -1], // W right → S
-    [2, 4, 0, 1], // W left → N
-  ];
-  for (let k = 0; k < 8; k++) {
-    const roadIdx = 6 + k;
-    const g = net.laneOffsets[roadIdx];
-    const car: Car = {
-      s: net.roads[roadIdx].length,
-      v: 10,
-      a: 0,
-      lane: g,
-      route: 0,
-      lateral: g,
-      lateralVel: 0,
-      laneFrom: g,
-      laneProgress: 1,
-      cooldown: 0,
-    };
-    const pose = def.carPose(car);
-    const [ex, ez, ehx, ehz] = expected[k];
-    assert(
-      Math.abs(pose.x - ex) < 1 && Math.abs(pose.z - ez) < 1,
-      `arc ${roadIdx} ends at its exit lane (got ${pose.x.toFixed(1)}, ${pose.z.toFixed(1)})`,
-    );
-    assert(
-      Math.abs(Math.cos(pose.angle) - ehx) < 0.2 && Math.abs(-Math.sin(pose.angle) - ehz) < 0.2,
-      `arc ${roadIdx} exits with the right heading`,
-    );
+  // End poses per driving side (turn lanes mirror across each road's centerline).
+  const tables: Record<number, [number, number, number, number][]> = {
+    '1': [
+      [-4, -2, -1, 0], // S right → W
+      [4, 2, 1, 0], // S left → E
+      [4, 2, 1, 0], // N right → E
+      [-4, -2, -1, 0], // N left → W
+      [2, -4, 0, -1], // E right → S
+      [-2, 4, 0, 1], // E left → N
+      [-2, 4, 0, 1], // W right → N
+      [2, -4, 0, -1], // W left → S
+    ],
+    '-1': [
+      [-4, 2, -1, 0], // S right → W
+      [4, -2, 1, 0], // S left → E
+      [4, -2, 1, 0], // N right → E
+      [-4, 2, -1, 0], // N left → W
+      [-2, -4, 0, -1], // E right → S
+      [2, 4, 0, 1], // E left → N
+      [2, 4, 0, 1], // W right → N
+      [-2, -4, 0, -1], // W left → S
+    ],
+  };
+  for (const handed of [1, -1]) {
+    buildScene4({ approach: 80, lanesEachWay: 1 }, handed);
+    const def = SCENES[3];
+    const net = scene4State.state!.net;
+    const expected = handed === 1 ? tables[1] : tables[-1];
+    for (let k = 0; k < 8; k++) {
+      const roadIdx = 6 + k;
+      const g = net.laneOffsets[roadIdx];
+      const car: Car = {
+        s: net.roads[roadIdx].length,
+        v: 10,
+        a: 0,
+        lane: g,
+        route: 0,
+        lateral: g,
+        lateralVel: 0,
+        laneFrom: g,
+        laneProgress: 1,
+        cooldown: 0,
+      };
+      const pose = def.carPose(car);
+      const [ex, ez, ehx, ehz] = expected[k];
+      assert(
+        Math.abs(pose.x - ex) < 1 && Math.abs(pose.z - ez) < 1,
+        `arc ${roadIdx} ends at its exit lane (handed ${handed}, got ${pose.x.toFixed(1)}, ${pose.z.toFixed(1)})`,
+      );
+      assert(
+        Math.abs(Math.cos(pose.angle) - ehx) < 0.2 && Math.abs(-Math.sin(pose.angle) - ehz) < 0.2,
+        `arc ${roadIdx} exits with the right heading (handed ${handed})`,
+      );
+    }
   }
   console.log('Turn geometry checks passed');
 }

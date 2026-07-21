@@ -5,6 +5,7 @@ import type { RoadConfig } from '../sim/road';
 
 export interface TrafficSettings {
   scene: number;
+  trafficSide: 'right' | 'left';
   timeScale: number;
   carLength: number;
   dayMode: boolean;
@@ -36,6 +37,7 @@ export function setupGui(): GuiState {
   const state: GuiState = {
     settings: {
       scene: 1,
+      trafficSide: 'right',
       timeScale: 1,
       carLength: 4.5,
       dayMode: true,
@@ -64,6 +66,9 @@ export function setupGui(): GuiState {
       'Scene 4 (intersection)': 4,
     })
     .name('Scene');
+  gui
+    .add(state.settings, 'trafficSide', { 'Right (US/CN)': 'right', 'Left (UK/AU)': 'left' })
+    .name('Driving side');
   gui.add(state.settings, 'timeScale', 0.1, 3, 0.1).name('Time scale');
   gui.add(state.settings, 'carLength', 3, 8, 0.5).name('Vehicle length (m)');
   gui.add(state.settings, 'dayMode').name('Daylight');

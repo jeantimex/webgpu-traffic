@@ -36,7 +36,7 @@ export interface Lane {
 const LANE_WIDTH = 4;
 
 function straightPath(length: number): (s: number) => PathPoint {
-  return (s) => ({ x: s - length / 2, z: 0, hx: 1, hz: 0, rx: 0, rz: -1 });
+  return (s) => ({ x: s - length / 2, z: 0, hx: 1, hz: 0, rx: 0, rz: 1 });
 }
 
 const MIN_ANGLE_DEG = 5; // a zero-length road is degenerate
@@ -60,8 +60,8 @@ function arcPath(radius: number, angleDeg: number): (s: number) => PathPoint {
       z: mirror * (radius * (1 - Math.cos(phi)) - zOffset),
       hx,
       hz,
-      rx: hz,
-      rz: -hx,
+      rx: -hz,
+      rz: hx,
     };
   };
 }
@@ -101,7 +101,7 @@ function scurvePath(radius: number, angleDeg: number): (s: number) => PathPoint 
       hz = Math.sin(theta - psi);
     }
     hz *= mirror;
-    return { x: x - cx, z: mirror * (z - cz), hx, hz, rx: hz, rz: -hx };
+    return { x: x - cx, z: mirror * (z - cz), hx, hz, rx: -hz, rz: hx };
   };
 }
 
@@ -110,7 +110,10 @@ export class Road {
   readonly length: number;
   private readonly path: (s: number) => PathPoint;
 
-  constructor(readonly config: RoadConfig) {
+  constructor(
+    readonly config: RoadConfig,
+    handed = 1, // 1 = right-hand traffic, -1 = left-hand traffic (mirrors lane sides)
+  ) {
     switch (config.shape) {
       case 'straight':
         this.length = config.length;
@@ -126,10 +129,10 @@ export class Road {
         break;
     }
     for (let i = 0; i < config.lanesForward; i++) {
-      this.lanes.push({ direction: 1, offset: LANE_WIDTH / 2 + i * LANE_WIDTH });
+      this.lanes.push({ direction: 1, offset: (LANE_WIDTH / 2 + i * LANE_WIDTH) * handed });
     }
     for (let j = 0; j < config.lanesBackward; j++) {
-      this.lanes.push({ direction: -1, offset: -(LANE_WIDTH / 2 + j * LANE_WIDTH) });
+      this.lanes.push({ direction: -1, offset: -(LANE_WIDTH / 2 + j * LANE_WIDTH) * handed });
     }
   }
 

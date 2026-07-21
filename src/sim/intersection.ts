@@ -55,38 +55,55 @@ export const ARC = {
 /** Distance from the zone edge to the stop line (leaves room for the crosswalk after it). */
 export const STOP_BACK = 4.5;
 
-export function buildIntersection(cfg: IntersectionConfig): IntersectionState {
+export function buildIntersection(cfg: IntersectionConfig, handed = 1): IntersectionState {
   const lanes = cfg.lanesEachWay;
   const mk = (length: number): Road =>
-    new Road({
-      shape: 'straight',
-      length,
-      radius: 50,
-      angle: 90,
-      lanesForward: lanes,
-      lanesBackward: lanes,
-    });
+    new Road(
+      {
+        shape: 'straight',
+        length,
+        radius: 50,
+        angle: 90,
+        lanesForward: lanes,
+        lanesBackward: lanes,
+      },
+      handed,
+    );
   const mkArc = (radius: number, angle: number): Road => {
     // Turn paths run a single lane centered on the arc, from approach lane to exit lane.
-    const road = new Road({ shape: 'arc', length: 0, radius, angle, lanesForward: 1, lanesBackward: 0 });
+    const road = new Road({ shape: 'arc', length: 0, radius, angle, lanesForward: 1, lanesBackward: 0 }, handed);
     road.lanes[0].offset = 0;
     return road;
   };
 
   const zoneHalf = 4 * lanes; // the zone is exactly as wide as the roads it joins
+  // Right turns hug the near corner, left turns swing wide — but with left-hand traffic
+  // the turn lanes sit on the far side, so the radii swap (exact for one lane each way).
+  const rRight = handed > 0 ? 2 : 6;
+  const rLeft = handed > 0 ? 6 : 2;
   const roads = [
     ...[cfg.approach, cfg.approach, cfg.approach, cfg.approach].map(mk),
     ...[zoneHalf * 2, zoneHalf * 2].map(mk),
-    // Turn arcs, exact for one lane each way: right turns sweep 2 m, left turns 6 m.
-    // ponytail: with more lanes the radii only approximate the outer/inner turn lanes.
-    mkArc(2, -90), // S right → W
-    mkArc(6, 90), // S left → E
-    mkArc(2, -90), // N right → E
-    mkArc(6, 90), // N left → W
-    mkArc(2, -90), // E right → S
-    mkArc(6, 90), // E left → N
-    mkArc(2, -90), // W right → N
-    mkArc(6, 90), // W left → S
+    mkArc(rRight, 90), // S right → W
+    mkArc(rLeft, -90), // S left → E
+    mkArc(rRight, 90), // N right → E
+    mkArc(rLeft, -90), // N left → W
+    mkArc(rRight, 90), // E right → S
+    mkArc(rLeft, -90), // E left → N
+    mkArc(rRight, 90), // W right → N
+    mkArc(rLeft, -90), // W left → S
+  ];
+  // Exit table: handedness-invariant (turn direction is heading-based; only lane
+  // positions, entry points, and radii change between RHT and LHT).
+  const exitLinks: RoadLink[] = [
+    [ARC.sRight, IDX.w, 1, 1],
+    [ARC.sLeft, IDX.e],
+    [ARC.nRight, IDX.e],
+    [ARC.nLeft, IDX.w, 1, 1],
+    [ARC.eRight, IDX.s, 1, 1],
+    [ARC.eLeft, IDX.n],
+    [ARC.wRight, IDX.n],
+    [ARC.wLeft, IDX.s, 1, 1],
   ];
   const links: RoadLink[] = [
     // straight flow
@@ -103,16 +120,7 @@ export function buildIntersection(cfg: IntersectionConfig): IntersectionState {
     [IDX.e, ARC.eLeft, 0, 0],
     [IDX.w, ARC.wRight],
     [IDX.w, ARC.wLeft],
-    // turn arcs → exit roads (right-hand traffic: right turns to the near road, left
-    // turns across to the far road)
-    [ARC.sRight, IDX.e],
-    [ARC.sLeft, IDX.w, 1, 1],
-    [ARC.nRight, IDX.w, 1, 1],
-    [ARC.nLeft, IDX.e],
-    [ARC.eRight, IDX.n],
-    [ARC.eLeft, IDX.s, 1, 1],
-    [ARC.wRight, IDX.s, 1, 1],
-    [ARC.wLeft, IDX.n],
+    ...exitLinks,
   ];
   const net = buildNetwork(roads, links);
 

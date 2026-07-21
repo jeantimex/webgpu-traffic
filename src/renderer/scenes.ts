@@ -542,9 +542,10 @@ function applyTransform(p: PathPoint, t: Transform): PathPoint {
 }
 
 /** The active scene-3 network, rebuilt by the renderer on scene switch or config change. */
-export const scene3State: { net: Network | null; transforms: Transform[] } = {
+export const scene3State: { net: Network | null; transforms: Transform[]; handed: number } = {
   net: null,
   transforms: [],
+  handed: 1,
 };
 
 function requireNet(): Network {
@@ -553,9 +554,9 @@ function requireNet(): Network {
 }
 
 /** Builds the two-road network and places road B at road A's end. */
-export function buildScene3(cfgA: RoadConfig, cfgB: RoadConfig): void {
-  const roadA = new Road(cfgA);
-  const roadB = new Road(cfgB);
+export function buildScene3(cfgA: RoadConfig, cfgB: RoadConfig, handed = 1): void {
+  const roadA = new Road(cfgA, handed);
+  const roadB = new Road(cfgB, handed);
   const net = buildNetwork([roadA, roadB], [[0, 1]]);
   const tA: Transform = { tx: 0, tz: 0, cos: 1, sin: 0 };
   // Rotate B so its start heading matches A's end heading, then translate B's start to A's end.
@@ -573,6 +574,7 @@ export function buildScene3(cfgA: RoadConfig, cfgB: RoadConfig): void {
   };
   scene3State.net = net;
   scene3State.transforms = [tA, tB];
+  scene3State.handed = handed;
 }
 
 function buildRoadStatic(road: Road, palette: Palette, t: Transform): number[] {
@@ -614,7 +616,7 @@ function buildRoadStatic(road: Road, palette: Palette, t: Transform): number[] {
   return verts;
 }
 
-function networkCarPose(net: Network, transforms: Transform[], car: Car): Pose {
+function networkCarPose(net: Network, transforms: Transform[], car: Car, handed: number): Pose {
   const from = locate(net, Math.round(car.laneFrom));
   const to = locate(net, car.lane);
   const road = net.roads[to.road];
@@ -627,8 +629,8 @@ function networkCarPose(net: Network, transforms: Transform[], car: Car): Pose {
   const dir = toLane.direction;
   const p = applyTransform(road.point(car.s), transforms[to.road]);
   // Nose along the true velocity: travel direction plus the lateral slide (the body's
-  // local +z is the left normal, so the offset rate along the right normal negates it).
-  const yaw = Math.atan2(offsetVel * dir, Math.max(car.v, 1));
+  // local +z is the right normal; handedness flips which side the lanes sit on).
+  const yaw = Math.atan2(-offsetVel * dir * handed, Math.max(car.v, 1));
   return {
     x: p.x + p.rx * offset,
     y: 0.02,
@@ -654,7 +656,7 @@ function roadScene(): SceneDef {
         .flatMap((road, r) => buildRoadStatic(road, palette, scene3State.transforms[r]))
         .concat(groundVerts);
     },
-    carPose: (car) => networkCarPose(requireNet(), scene3State.transforms, car),
+    carPose: (car) => networkCarPose(requireNet(), scene3State.transforms, car, scene3State.handed),
     step: (cars, params, carLength, dt) => stepNetwork(requireNet(), cars, params, carLength, dt),
     leaderGap: (cars, i, carLength) => networkGapAhead(requireNet(), cars, i, carLength),
     findSpawnSlot: (cars, _carParams, params, carLength) =>
@@ -668,10 +670,16 @@ function roadScene(): SceneDef {
 // from sim/intersection.ts.
 // ---------------------------------------------------------------------------
 
-export const scene4State: { state: IntersectionState | null; transforms: Transform[]; lamps: { x: number; z: number }[] } = {
+export const scene4State: {
+  state: IntersectionState | null;
+  transforms: Transform[];
+  lamps: { x: number; z: number }[];
+  handed: number;
+} = {
   state: null,
   transforms: [],
   lamps: [],
+  handed: 1,
 };
 
 function requireScene4(): IntersectionState {
@@ -695,8 +703,8 @@ function placeAt(road: Road, atS: number, target: { x: number; z: number; hx: nu
 }
 
 /** Builds the intersection network and places every road around the zone. */
-export function buildScene4(cfg: IntersectionConfig): void {
-  const state = buildIntersection(cfg);
+export function buildScene4(cfg: IntersectionConfig, handed = 1): void {
+  const state = buildIntersection(cfg, handed);
   const zh = state.zoneHalf;
   const L = cfg.approach;
   const edge = 4 * cfg.lanesEachWay + 1.2; // lamp offset from the approach centerline
@@ -709,23 +717,24 @@ export function buildScene4(cfg: IntersectionConfig): void {
     placeAt(state.net.roads[IDX.w], L, { x: -zh, z: 0, hx: 1, hz: 0 }),
     placeAt(state.net.roads[IDX.nsConn], 0, { x: 0, z: -zh, hx: 0, hz: 1 }),
     placeAt(state.net.roads[IDX.ewConn], 0, { x: -zh, z: 0, hx: 1, hz: 0 }),
-    // Turn arcs, pinned at their entry lane positions (right lane outer, left lane inner).
-    placeAt(state.net.roads[ARC.sRight], 0, { x: outer, z: -zh, hx: 0, hz: 1 }),
-    placeAt(state.net.roads[ARC.sLeft], 0, { x: 2, z: -zh, hx: 0, hz: 1 }),
-    placeAt(state.net.roads[ARC.nRight], 0, { x: -outer, z: zh, hx: 0, hz: -1 }),
-    placeAt(state.net.roads[ARC.nLeft], 0, { x: -2, z: zh, hx: 0, hz: -1 }),
-    placeAt(state.net.roads[ARC.eRight], 0, { x: zh, z: outer, hx: -1, hz: 0 }),
-    placeAt(state.net.roads[ARC.eLeft], 0, { x: zh, z: 2, hx: -1, hz: 0 }),
-    placeAt(state.net.roads[ARC.wRight], 0, { x: -zh, z: -outer, hx: 1, hz: 0 }),
-    placeAt(state.net.roads[ARC.wLeft], 0, { x: -zh, z: -2, hx: 1, hz: 0 }),
+    // Turn arcs, pinned at their entry lane positions (mirrored with handedness).
+    placeAt(state.net.roads[ARC.sRight], 0, { x: -outer * handed, z: -zh, hx: 0, hz: 1 }),
+    placeAt(state.net.roads[ARC.sLeft], 0, { x: -2 * handed, z: -zh, hx: 0, hz: 1 }),
+    placeAt(state.net.roads[ARC.nRight], 0, { x: outer * handed, z: zh, hx: 0, hz: -1 }),
+    placeAt(state.net.roads[ARC.nLeft], 0, { x: 2 * handed, z: zh, hx: 0, hz: -1 }),
+    placeAt(state.net.roads[ARC.eRight], 0, { x: zh, z: -outer * handed, hx: -1, hz: 0 }),
+    placeAt(state.net.roads[ARC.eLeft], 0, { x: zh, z: -2 * handed, hx: -1, hz: 0 }),
+    placeAt(state.net.roads[ARC.wRight], 0, { x: -zh, z: outer * handed, hx: 1, hz: 0 }),
+    placeAt(state.net.roads[ARC.wLeft], 0, { x: -zh, z: 2 * handed, hx: 1, hz: 0 }),
   ];
   // Lamp stacks on the right side of each entering approach, just before its stop line.
   scene4State.lamps = [
-    { x: edge, z: -zh - 1 }, // S
-    { x: -edge, z: zh + 1 }, // N
-    { x: zh + 1, z: edge }, // E
-    { x: -zh - 1, z: -edge }, // W
+    { x: -edge * handed, z: -zh - 1 }, // S
+    { x: edge * handed, z: zh + 1 }, // N
+    { x: zh + 1, z: -edge * handed }, // E
+    { x: -zh - 1, z: edge * handed }, // W
   ];
+  scene4State.handed = handed;
 }
 
 function buildIntersectionStatic(palette: Palette): number[] {
@@ -809,7 +818,7 @@ function intersectionScene(): SceneDef {
       return scene4State.lamps;
     },
     buildStatic: buildIntersectionStatic,
-    carPose: (car) => networkCarPose(requireScene4().net, scene4State.transforms, car),
+    carPose: (car) => networkCarPose(requireScene4().net, scene4State.transforms, car, scene4State.handed),
     phaseAt: (clock, light) => intersectionPhaseAt(clock, light),
     obstaclesFor: (phase) => intersectionObstacles(requireScene4(), phase as IntersectionPhase),
     lampColor: (lamp, phase) => intersectionLampColor(requireScene4(), lamp, phase as IntersectionPhase),

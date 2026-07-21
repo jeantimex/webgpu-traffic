@@ -145,11 +145,11 @@ export class Renderer {
 
     this.scene = gui.settings.scene;
     if (this.scene === 3) {
-      buildScene3(this.gui.settings.scene3, this.gui.settings.scene3B);
-      this.roadKey = JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B]);
+      buildScene3(this.gui.settings.scene3, this.gui.settings.scene3B, this.handed());
+      this.roadKey = JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B, this.gui.settings.trafficSide]);
     } else if (this.scene === 4) {
-      buildScene4(this.gui.settings.scene4);
-      this.roadKey = JSON.stringify(this.gui.settings.scene4);
+      buildScene4(this.gui.settings.scene4, this.handed());
+      this.roadKey = JSON.stringify([this.gui.settings.scene4, this.gui.settings.trafficSide]);
     }
     this.def = SCENES[this.scene - 1];
 
@@ -260,15 +260,19 @@ export class Renderer {
     return PALETTES[this.gui.settings.dayMode ? 'day' : 'night'];
   }
 
+  private handed(): number {
+    return this.gui.settings.trafficSide === 'right' ? 1 : -1;
+  }
+
   /** Switches the active scene: rebuilds the static mesh and restarts traffic. */
   private applyScene(scene: number): void {
     this.scene = scene;
     if (scene === 3) {
-      buildScene3(this.gui.settings.scene3, this.gui.settings.scene3B);
-      this.roadKey = JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B]);
+      buildScene3(this.gui.settings.scene3, this.gui.settings.scene3B, this.handed());
+      this.roadKey = JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B, this.gui.settings.trafficSide]);
     } else if (scene === 4) {
-      buildScene4(this.gui.settings.scene4);
-      this.roadKey = JSON.stringify(this.gui.settings.scene4);
+      buildScene4(this.gui.settings.scene4, this.handed());
+      this.roadKey = JSON.stringify([this.gui.settings.scene4, this.gui.settings.trafficSide]);
     }
     this.def = SCENES[scene - 1];
     const staticVerts = this.def.buildStatic(this.palette());
@@ -389,8 +393,8 @@ export class Renderer {
     if (this.scene === 3 || this.scene === 4) {
       const key =
         this.scene === 3
-          ? JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B])
-          : JSON.stringify(this.gui.settings.scene4);
+          ? JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B, this.gui.settings.trafficSide])
+          : JSON.stringify([this.gui.settings.scene4, this.gui.settings.trafficSide]);
       if (key !== this.roadKey) this.applyScene(this.scene);
     }
 
