@@ -809,10 +809,10 @@ function buildIntersectionStatic(palette: Palette): number[] {
       const [a, b] = enteringFwd ? stopSide(0, oMax) : stopSide(oMin, 0);
       paint_patch(road, t, stopS - 0.125, stopS + 0.125, a, b);
     }
-    // Scene-1 layout: a 3.5 m zebra band across the full road width after the line.
+    // Scene-1 layout: a 3.5 m zebra band across the full road width after the line,
+    // stripe count derived from the road width.
     const [z0, z1] = enteringFwd ? [stopS + 0.8, stopS + 4.3] : [STOP_BACK - 4.3, STOP_BACK - 0.8];
-    for (let k = 0; k < 8; k++) {
-      const o0 = oMin + 0.4 + k * 1.0;
+    for (let o0 = oMin + 0.4; o0 + 0.5 <= oMax - 0.4 + 1e-6; o0 += 1.0) {
       paint_patch(road, t, z0, z1, o0, o0 + 0.5);
     }
   };
