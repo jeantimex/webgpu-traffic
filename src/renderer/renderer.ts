@@ -1,9 +1,10 @@
 import { MAX_CARS, NEW_CAR_PARAMS, type GuiState } from '../gui/settings_gui';
-import { B_SAFE, idmAcceleration, stepRing, type Car, type IdmParams, type Obstacle } from '../sim/idm';
+import { type Car, type IdmParams, type Obstacle } from '../sim/idm';
+import { Road } from '../sim/road';
 import { identity, lookAt, multiply, perspective, rotationZ, translationRotationY } from '../utils/mat4';
 import { OrbitCamera } from '../utils/orbit';
 import { createBufferWithData, resizeCanvasToDisplaySize, type WebGPUState } from '../webgpu/utils';
-import { PALETTES, SCENES, pushBox, type Palette, type SceneDef, type Vec3 } from './scenes';
+import { PALETTES, SCENES, pushBox, scene3State, type Palette, type SceneDef, type Vec3 } from './scenes';
 
 const trafficShader = /* wgsl */ `
   struct Camera {
@@ -111,6 +112,7 @@ export class Renderer {
   private carParams: IdmParams[] = [];
   private def: SceneDef;
   private scene: number;
+  private roadKey = '';
   private builtCarLength: number;
   private builtDayMode: boolean;
   private lightClock = 0;
@@ -131,6 +133,10 @@ export class Renderer {
     this.format = gpu.format;
 
     this.scene = gui.settings.scene;
+    if (this.scene === 3) {
+      scene3State.road = new Road(this.gui.settings.scene3);
+      this.roadKey = JSON.stringify(this.gui.settings.scene3);
+    }
     this.def = SCENES[this.scene - 1];
 
     // Vertex layout: [car mesh][lamp mesh][static scene mesh] — car/lamp offsets are
@@ -211,7 +217,7 @@ export class Renderer {
       ],
     });
 
-    this.resetCars();
+    this.resetCars(false);
     this.builtCarLength = this.gui.settings.carLength;
     this.builtDayMode = this.gui.settings.dayMode;
     this.orbit = new OrbitCamera(canvas);
@@ -247,8 +253,12 @@ export class Renderer {
   }
 
   /** Switches the active scene: rebuilds the static mesh and restarts traffic. */
-  private applyScene(scene: number): void {
+  private applyScene(scene: number, preserveCars = false): void {
     this.scene = scene;
+    if (scene === 3) {
+      scene3State.road = new Road(this.gui.settings.scene3);
+      this.roadKey = JSON.stringify(this.gui.settings.scene3);
+    }
     this.def = SCENES[scene - 1];
     const staticVerts = this.def.buildStatic(this.palette());
     this.staticVertexCount = staticVerts.length / 9;
@@ -259,80 +269,56 @@ export class Renderer {
       new Float32Array([...this.carVerts, ...this.lampVerts, ...staticVerts]),
       GPUBufferUsage.VERTEX,
     );
-    this.resetCars();
+    this.resetCars(preserveCars);
     this.lightClock = 0;
   }
 
-  /** Places all cars at their start positions for the current scene. */
-  private resetCars(): void {
+  /**
+   * Places all cars for the current scene. Fresh scenes deal cars round-robin; a scene-3
+   * config rebuild preserves each car's lane/position/speed instead (clamped to what
+   * still exists), so adding a lane doesn't scatter traffic.
+   */
+  private resetCars(preserve: boolean): void {
     const c = this.def.c;
-    this.cars = this.gui.settings.cars.map((params, i) => ({
-      s: START_FRACTIONS[i % START_FRACTIONS.length] * c,
-      v: params.v0,
-      a: 0,
-      lane: START_LANES[i % START_LANES.length],
-      lateral: START_LANES[i % START_LANES.length],
-      lateralVel: 0,
-      laneFrom: START_LANES[i % START_LANES.length],
-      laneProgress: 1,
-      cooldown: 0,
-    }));
+    const numLanes = this.scene === 3 ? (scene3State.road?.lanes.length ?? 1) : 2;
+    const laneFor = (i: number): number =>
+      this.scene === 3 ? i % numLanes : START_LANES[i % START_LANES.length] % numLanes;
+    this.cars = this.gui.settings.cars.map((params, i) => {
+      const prev = preserve && this.carParams[i] === params ? this.cars[i] : undefined;
+      if (prev) {
+        const lane = Math.min(prev.lane, numLanes - 1);
+        return {
+          ...prev,
+          s: Math.min(prev.s, c),
+          lane,
+          lateral: lane,
+          lateralVel: 0,
+          laneFrom: lane,
+          laneProgress: 1,
+        };
+      }
+      return {
+        s: START_FRACTIONS[i % START_FRACTIONS.length] * c,
+        v: params.v0,
+        a: 0,
+        lane: laneFor(i),
+        lateral: laneFor(i),
+        lateralVel: 0,
+        laneFrom: laneFor(i),
+        laneProgress: 1,
+        cooldown: 0,
+      };
+    });
     this.carParams = [...this.gui.settings.cars];
   }
 
-  /**
-   * Best safe spawn slot for a car with `params`, or null when the road is too full.
-   * Safe = neither the new car nor its lane follower would brake harder than B_SAFE.
-   * A car mid-lane-change counts as occupying both lanes.
-   */
-  private findSpawnSlot(params: IdmParams): { s: number; lane: number } | null {
-    const c = this.def.c;
-    const carLength = this.gui.settings.carLength;
-    let best: { s: number; lane: number } | null = null;
-    let bestScore = -Infinity;
-    for (let lane = 0; lane <= 1; lane++) {
-      for (let k = 0; k < 32; k++) {
-        const s = (k * c) / 32;
-        let leaderGap = Infinity;
-        let leaderV = params.v0;
-        let followerGap = Infinity;
-        let followerV = params.v0;
-        let followerParams: IdmParams | null = null;
-        this.cars.forEach((car, j) => {
-          if (car.lane !== lane && car.laneProgress >= 1) return;
-          const fwd = (((car.s - s) % c) + c) % c;
-          if (fwd < leaderGap) {
-            leaderGap = fwd;
-            leaderV = car.v;
-          }
-          const back = (c - fwd) % c;
-          if (back < followerGap) {
-            followerGap = back;
-            followerV = car.v;
-            followerParams = this.carParams[j];
-          }
-        });
-        if (idmAcceleration(params.v0, leaderGap - carLength, params.v0 - leaderV, params) < -B_SAFE)
-          continue;
-        if (
-          followerParams !== null &&
-          idmAcceleration(followerV, followerGap - carLength, followerV - params.v0, followerParams) <
-            -B_SAFE
-        )
-          continue;
-        const score = Math.min(leaderGap, followerGap);
-        if (score > bestScore) {
-          bestScore = score;
-          best = { s, lane };
-        }
-      }
-    }
-    return best;
-  }
-
-  /** Spawns a car in the best safe slot (falls back to the loop start; the Add button prevents this). */
+  /** Spawns a car in the scene's best safe slot (falls back to the start; the Add button prevents this). */
   private spawnCar(params: IdmParams): Car {
-    const slot = this.findSpawnSlot(params) ?? { s: 0, lane: 0 };
+    const slot =
+      this.def.findSpawnSlot(this.cars, this.carParams, params, this.gui.settings.carLength) ?? {
+        s: 0,
+        lane: 0,
+      };
     return {
       s: slot.s,
       v: params.v0,
@@ -362,20 +348,13 @@ export class Renderer {
     this.carParams = [...paramsList];
   }
 
-  /** Bumper gap to the nearest car ahead in the same lane, or null when alone in the lane. */
-  private leaderGap(i: number): number | null {
-    const c = this.def.c;
-    const car = this.cars[i];
-    let gap = Infinity;
-    for (let j = 0; j < this.cars.length; j++) {
-      if (j === i || this.cars[j].lane !== car.lane) continue;
-      gap = Math.min(gap, (((this.cars[j].s - car.s) % c) + c) % c);
-    }
-    return Number.isFinite(gap) ? gap - this.gui.settings.carLength : null;
-  }
-
   private readonly render = (now: number): void => {
     if (this.gui.settings.scene !== this.scene) this.applyScene(this.gui.settings.scene);
+    // Scene 3's road is user-configurable: rebuild it on any change, keeping car state.
+    if (this.scene === 3) {
+      const key = JSON.stringify(this.gui.settings.scene3);
+      if (key !== this.roadKey) this.applyScene(3, true);
+    }
 
     const resized = resizeCanvasToDisplaySize(this.canvas, this.device.limits.maxTextureDimension2D);
     if (resized || !this.configured) {
@@ -400,16 +379,17 @@ export class Renderer {
     const dt = Math.min((now - (this.lastTime ?? now)) / 1000, 0.25);
     this.lastTime = now;
     this.syncCars();
-    this.gui.canSpawn = this.findSpawnSlot(NEW_CAR_PARAMS) !== null;
+    this.gui.canSpawn =
+      this.def.findSpawnSlot(this.cars, this.carParams, NEW_CAR_PARAMS, this.gui.settings.carLength) !==
+      null;
     this.accumulator = Math.min(this.accumulator + dt * this.gui.settings.timeScale, 1);
     while (this.accumulator >= SIM_STEP) {
       this.lightClock += SIM_STEP;
       // Yellow brakes like red: stop if you can.
       const clear = this.currentPhase() === 'green';
-      stepRing(
+      this.def.step(
         this.cars,
         this.gui.settings.cars,
-        this.def.c,
         this.gui.settings.carLength,
         SIM_STEP,
         clear ? NO_OBSTACLES : this.def.obstacles,
@@ -437,7 +417,7 @@ export class Renderer {
       );
     }
     this.cars.forEach((car, i) => {
-      const gap = this.leaderGap(i);
+      const gap = this.def.leaderGap(this.cars, i, this.gui.settings.carLength);
       this.gui.telemetry.speeds[String(i)] =
         gap === null
           ? `${car.v.toFixed(1)} m/s, free road`

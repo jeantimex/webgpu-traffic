@@ -46,9 +46,9 @@ export interface Obstacle {
 
 // Lane-change tuning (MOBIL-lite).
 const LANE_CHANGE_TIME = 2; // s for the lateral slide
-const LANE_CHANGE_COOLDOWN = 4; // s between one car's lane changes (prevents weaving)
+export const LANE_CHANGE_COOLDOWN = 4; // s between one car's lane changes (prevents weaving)
 export const B_SAFE = 4; // m/s², the most braking a lane change (or spawn) may impose on anyone
-const DELTA_A = 0.2; // m/s², minimum advantage that makes a change worthwhile
+export const DELTA_A = 0.2; // m/s², minimum advantage that makes a change worthwhile
 const KEEP_RIGHT_GAP = 60; // m, "inner lane is free ahead" threshold for drifting back
 
 interface LaneNeighbor {
@@ -116,6 +116,21 @@ function updateLanes(cars: Car[], params: IdmParams[], circumference: number, ca
   }
 }
 
+/** Advances one car's cooldown and cosine-eased lane-change slide by dt (S-curve, zero jerk at both ends). */
+export function advanceLateral(car: Car, dt: number): void {
+  car.cooldown = Math.max(0, car.cooldown - dt);
+  if (car.laneProgress < 1) {
+    car.laneProgress = Math.min(1, car.laneProgress + dt / LANE_CHANGE_TIME);
+    const p = car.laneProgress;
+    car.lateral = car.laneFrom + (car.lane - car.laneFrom) * (0.5 - 0.5 * Math.cos(Math.PI * p));
+    car.lateralVel =
+      ((car.lane - car.laneFrom) * 0.5 * Math.PI * Math.sin(Math.PI * p)) / LANE_CHANGE_TIME;
+    if (p === 1) car.lateralVel = 0;
+  } else {
+    car.lateralVel = 0;
+  }
+}
+
 /**
  * Advances every car on the ring by one fixed step (semi-implicit Euler).
  * Each car follows the nearest car ahead of it in its lane and brakes for any
@@ -160,18 +175,6 @@ export function stepRing(
     car.a = accels[i];
     car.v = Math.max(0, car.v + car.a * dt);
     car.s = (car.s + car.v * dt) % circumference;
-    car.cooldown = Math.max(0, car.cooldown - dt);
-    // Cosine-eased lateral slide: zero lateral velocity at both ends, so the car's
-    // path is an S-curve that joins the target lane without a heading jerk.
-    if (car.laneProgress < 1) {
-      car.laneProgress = Math.min(1, car.laneProgress + dt / LANE_CHANGE_TIME);
-      const p = car.laneProgress;
-      car.lateral = car.laneFrom + (car.lane - car.laneFrom) * (0.5 - 0.5 * Math.cos(Math.PI * p));
-      car.lateralVel =
-        ((car.lane - car.laneFrom) * 0.5 * Math.PI * Math.sin(Math.PI * p)) / LANE_CHANGE_TIME;
-      if (p === 1) car.lateralVel = 0;
-    } else {
-      car.lateralVel = 0;
-    }
+    advanceLateral(car, dt);
   }
 }

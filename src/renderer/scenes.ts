@@ -1,6 +1,22 @@
-import type { Car, Obstacle } from '../sim/idm';
+import {
+  B_SAFE,
+  idmAcceleration,
+  stepRing,
+  type Car,
+  type IdmParams,
+  type Obstacle,
+} from '../sim/idm';
+import { Road, roadGapAhead, roadSpawnSlot, stepRoad } from '../sim/road';
 
 export type Vec3 = [number, number, number];
+
+export interface Pose {
+  x: number;
+  y: number;
+  z: number;
+  angle: number;
+  pitch: number;
+}
 
 export interface Palette {
   sky: Vec3;
@@ -30,14 +46,25 @@ export const PALETTES: Record<'day' | 'night', Palette> = {
   },
 };
 
-/** Everything the renderer needs from a scene: layout, geometry, and car placement. */
+/** Everything the renderer needs from a scene: layout, geometry, car placement, and topology logic. */
 export interface SceneDef {
-  c: number; // loop circumference (m)
+  readonly c: number; // loop circumference (m); road length for the open-road scene
   obstacles: Obstacle[]; // stop lines, active while the light is not green
   lamps: { x: number; z: number }[]; // signal pole positions
   buildStatic(palette: Palette): number[];
   /** World position, heading angle (around +Y), and pitch for a car. */
-  carPose(car: Car): { x: number; y: number; z: number; angle: number; pitch: number };
+  carPose(car: Car): Pose;
+  /** Advances the sim one step; obstacles are the red-light stop lines (may be empty). */
+  step(cars: Car[], params: IdmParams[], carLength: number, dt: number, obstacles: Obstacle[]): void;
+  /** Bumper gap to the nearest car ahead in the same lane, or null when alone. */
+  leaderGap(cars: Car[], i: number, carLength: number): number | null;
+  /** Best safe spawn slot, or null when the road is too full. */
+  findSpawnSlot(
+    cars: Car[],
+    carParams: IdmParams[],
+    params: IdmParams,
+    carLength: number,
+  ): { s: number; lane: number } | null;
 }
 
 /** Appends a quad (6 vertices, interleaved position/normal/color). Corners must be CCW seen from outside. */
@@ -201,12 +228,74 @@ function ringStatic(palette: Palette): number[] {
   return verts;
 }
 
+/**
+ * Topology logic for closed loops (ring and square): same-direction lanes 0/1,
+ * wrap-around leader search, and safe-spawn evaluation over the whole loop.
+ */
+function ringTopology(c: number): Pick<SceneDef, 'step' | 'leaderGap' | 'findSpawnSlot'> {
+  return {
+    step: (cars, params, carLength, dt, obstacles) => stepRing(cars, params, c, carLength, dt, obstacles),
+    leaderGap: (cars, i, carLength) => {
+      const car = cars[i];
+      let gap = Infinity;
+      for (let j = 0; j < cars.length; j++) {
+        if (j === i || cars[j].lane !== car.lane) continue;
+        gap = Math.min(gap, (((cars[j].s - car.s) % c) + c) % c);
+      }
+      return Number.isFinite(gap) ? gap - carLength : null;
+    },
+    findSpawnSlot: (cars, carParams, params, carLength) => {
+      let best: { s: number; lane: number } | null = null;
+      let bestScore = -Infinity;
+      for (let lane = 0; lane <= 1; lane++) {
+        for (let k = 0; k < 32; k++) {
+          const s = (k * c) / 32;
+          let leaderGap = Infinity;
+          let leaderV = params.v0;
+          let followerGap = Infinity;
+          let followerV = params.v0;
+          let followerParams: IdmParams | null = null;
+          cars.forEach((car, j) => {
+            if (car.lane !== lane && car.laneProgress >= 1) return;
+            const fwd = (((car.s - s) % c) + c) % c;
+            if (fwd < leaderGap) {
+              leaderGap = fwd;
+              leaderV = car.v;
+            }
+            const back = (c - fwd) % c;
+            if (back < followerGap) {
+              followerGap = back;
+              followerV = car.v;
+              followerParams = carParams[j];
+            }
+          });
+          if (idmAcceleration(params.v0, leaderGap - carLength, params.v0 - leaderV, params) < -B_SAFE)
+            continue;
+          if (
+            followerParams !== null &&
+            idmAcceleration(followerV, followerGap - carLength, followerV - params.v0, followerParams) <
+              -B_SAFE
+          )
+            continue;
+          const score = Math.min(leaderGap, followerGap);
+          if (score > bestScore) {
+            bestScore = score;
+            best = { s, lane };
+          }
+        }
+      }
+      return best;
+    },
+  };
+}
+
 function ringScene(): SceneDef {
   return {
     c: RING_C,
     obstacles: [{ s: STOP_S }],
     lamps: [RING_LAMP],
     buildStatic: ringStatic,
+    ...ringTopology(RING_C),
     carPose(car) {
       const theta = car.s / TRACK_RADIUS;
       // Lane centers are 2 m either side of the track radius; lateral eases between them.
@@ -286,9 +375,10 @@ function squarePathPoint(s: number): PathPoint {
   };
 }
 
-/** Appends a path patch covering arc [s0, s1] and lateral offsets [o0, o1] (o+ = toward loop center). */
+/** Appends a path patch covering arc [s0, s1] and lateral offsets [o0, o1] (o+ = along the right normal). */
 function pushPathPatch(
   out: number[],
+  path: (s: number) => { x: number; z: number; rx: number; rz: number },
   s0: number,
   s1: number,
   o0: number,
@@ -297,7 +387,7 @@ function pushPathPatch(
   color: Vec3,
 ): void {
   const at = (s: number, o: number): Vec3 => {
-    const p = squarePathPoint(s);
+    const p = path(s);
     return [p.x + p.rx * o, y, p.z + p.rz * o];
   };
   pushQuad(out, [at(s0, o1), at(s1, o1), at(s1, o0), at(s0, o0)], color);
@@ -320,23 +410,23 @@ function squareStatic(palette: Palette): number[] {
 
   // Road ribbon, 1 m patches so the corner arcs are smooth.
   for (let s = 0; s < SQ_C; s += 1) {
-    pushPathPatch(verts, s, Math.min(s + 1, SQ_C), -ROAD_HALF_WIDTH, ROAD_HALF_WIDTH, 0.02, palette.asphalt);
+    pushPathPatch(verts, squarePathPoint, s, Math.min(s + 1, SQ_C), -ROAD_HALF_WIDTH, ROAD_HALF_WIDTH, 0.02, palette.asphalt);
   }
 
   const paint: Vec3 = [0.9, 0.9, 0.9];
   // Stop lines + zebra crossings (stripes parallel to travel) at every intersection.
   for (const stop of SQ_STOPS) {
-    pushPathPatch(verts, stop - 0.125, stop + 0.125, -ROAD_HALF_WIDTH, ROAD_HALF_WIDTH, 0.03, paint);
+    pushPathPatch(verts, squarePathPoint, stop - 0.125, stop + 0.125, -ROAD_HALF_WIDTH, ROAD_HALF_WIDTH, 0.03, paint);
     for (let i = 0; i < 7; i++) {
       const o0 = -ROAD_HALF_WIDTH + 0.6 + i * 1.0;
-      pushPathPatch(verts, stop + 0.8, stop + 4.3, o0, o0 + 0.5, 0.03, paint);
+      pushPathPatch(verts, squarePathPoint, stop + 0.8, stop + 4.3, o0, o0 + 0.5, 0.03, paint);
     }
   }
 
   // Dashed lane divider, skipping the crossings.
   for (let s = 0; s < SQ_C; s += 6) {
     if (SQ_STOPS.some((stop) => s > stop - 2 && s < stop + 6)) continue;
-    pushPathPatch(verts, s, s + 2, -0.075, 0.075, 0.03, paint);
+    pushPathPatch(verts, squarePathPoint, s, s + 2, -0.075, 0.075, 0.03, paint);
   }
 
   // Signal poles.
@@ -352,6 +442,7 @@ function squareScene(): SceneDef {
     obstacles: SQ_STOPS.map((s) => ({ s })),
     lamps: SQ_LAMPS,
     buildStatic: squareStatic,
+    ...ringTopology(SQ_C),
     carPose(car) {
       const p = squarePathPoint(car.s);
       // Lane centers are 2 m either side of the centerline (o+ = inner lane, toward the center).
@@ -368,4 +459,91 @@ function squareScene(): SceneDef {
   };
 }
 
-export const SCENES: SceneDef[] = [ringScene(), squareScene()];
+// ---------------------------------------------------------------------------
+// Scene 3: a single configurable Road (the building block). Geometry comes from
+// the Road class in the sim; the renderer rebuilds it whenever the GUI config changes.
+// ---------------------------------------------------------------------------
+
+/** The active scene-3 road, rebuilt by the renderer on scene switch or config change. */
+export const scene3State: { road: Road | null } = { road: null };
+
+function requireRoad(): Road {
+  if (!scene3State.road) throw new Error('scene 3 road not built yet');
+  return scene3State.road;
+}
+
+function buildRoadStatic(road: Road, palette: Palette): number[] {
+  const verts: number[] = [];
+  const G = 300;
+  pushQuad(verts, [[-G, 0, -G], [-G, 0, G], [G, 0, G], [G, 0, -G]], palette.ground);
+
+  const path = (s: number): { x: number; z: number; rx: number; rz: number } => road.point(s);
+  const f = road.config.lanesForward;
+  const b = road.config.lanesBackward;
+  const oMin = -4 * b;
+  const oMax = 4 * f;
+  const L = road.length;
+
+  // Road ribbon in 1 m patches (smooth on arcs).
+  for (let s = 0; s < L; s += 1) {
+    pushPathPatch(verts, path, s, Math.min(s + 1, L), oMin, oMax, 0.02, palette.asphalt);
+  }
+
+  // Solid yellow line separating the directions (the left edge on a one-way road).
+  const yellow: Vec3 = [0.8, 0.65, 0.1];
+  for (let s = 0; s < L; s += 2) {
+    pushPathPatch(verts, path, s, Math.min(s + 2, L), -0.075, 0.075, 0.03, yellow);
+  }
+
+  // White dashes between same-direction lanes.
+  const paint: Vec3 = [0.9, 0.9, 0.9];
+  const dashOffsets: number[] = [];
+  for (let i = 1; i < f; i++) dashOffsets.push(4 * i);
+  for (let j = 1; j < b; j++) dashOffsets.push(-4 * j);
+  for (const o of dashOffsets) {
+    for (let s = 0; s < L; s += 6) {
+      pushPathPatch(verts, path, s, Math.min(s + 2, L), o - 0.075, o + 0.075, 0.03, paint);
+    }
+  }
+
+  return verts;
+}
+
+function roadCarPose(road: Road, car: Car): Pose {
+  const fromLane = road.lanes[Math.round(car.laneFrom)];
+  const toLane = road.lanes[car.lane];
+  const span = car.lane - car.laneFrom;
+  const t = span === 0 ? 1 : (car.lateral - car.laneFrom) / span;
+  const offset = fromLane.offset + (toLane.offset - fromLane.offset) * t;
+  const offsetVel = span === 0 ? 0 : ((toLane.offset - fromLane.offset) * car.lateralVel) / span;
+  const dir = toLane.direction;
+  const p = road.point(car.s);
+  // Nose along the true velocity: travel direction plus the lateral slide. The yaw is
+  // the negated offset rate (local +z points along +offset), flipped for backward lanes.
+  const yaw = Math.atan2(-offsetVel * dir, Math.max(car.v, 1));
+  return {
+    x: p.x + p.rx * offset,
+    y: 0.02,
+    z: p.z + p.rz * offset,
+    angle: Math.atan2(-p.hz, p.hx) + (dir < 0 ? Math.PI : 0) + yaw,
+    pitch: 0,
+  };
+}
+
+function roadScene(): SceneDef {
+  return {
+    get c() {
+      return requireRoad().length;
+    },
+    obstacles: [],
+    lamps: [],
+    buildStatic: (palette) => buildRoadStatic(requireRoad(), palette),
+    carPose: (car) => roadCarPose(requireRoad(), car),
+    step: (cars, params, carLength, dt) => stepRoad(requireRoad(), cars, params, carLength, dt),
+    leaderGap: (cars, i, carLength) => roadGapAhead(requireRoad(), cars, i, carLength),
+    findSpawnSlot: (cars, _carParams, params, carLength) =>
+      roadSpawnSlot(requireRoad(), cars, params, carLength),
+  };
+}
+
+export const SCENES: SceneDef[] = [ringScene(), squareScene(), roadScene()];

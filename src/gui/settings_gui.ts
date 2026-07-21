@@ -1,5 +1,6 @@
 import GUI, { Controller } from 'lil-gui';
 import type { IdmParams } from '../sim/idm';
+import type { RoadConfig } from '../sim/road';
 
 export interface TrafficSettings {
   scene: number;
@@ -8,6 +9,7 @@ export interface TrafficSettings {
   dayMode: boolean;
   light: { green: number; yellow: number; red: number; override: 'auto' | 'green' | 'yellow' | 'red' };
   cars: IdmParams[];
+  scene3: RoadConfig;
 }
 
 export interface GuiState {
@@ -41,6 +43,7 @@ export function setupGui(): GuiState {
         { v0: 20, T: 1.5, a: 1.8, b: 2.2, s0: 2, delta: 4 },
         { v0: 25, T: 1.5, a: 2.2, b: 2.8, s0: 2, delta: 4 },
       ],
+      scene3: { shape: 'straight', length: 150, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 },
     },
     telemetry: { speeds: {}, light: '' },
     selectedCar: 0,
@@ -48,10 +51,26 @@ export function setupGui(): GuiState {
   };
 
   const gui = new GUI({ title: 'Traffic' });
-  gui.add(state.settings, 'scene', { 'Scene 1 (ring)': 1, 'Scene 2 (square)': 2 }).name('Scene');
+  gui
+    .add(state.settings, 'scene', {
+      'Scene 1 (ring)': 1,
+      'Scene 2 (square)': 2,
+      'Scene 3 (road)': 3,
+    })
+    .name('Scene');
   gui.add(state.settings, 'timeScale', 0.1, 3, 0.1).name('Time scale');
   gui.add(state.settings, 'carLength', 3, 8, 0.5).name('Vehicle length (m)');
   gui.add(state.settings, 'dayMode').name('Daylight');
+
+  const roadFolder = gui.addFolder('Road (scene 3)');
+  roadFolder
+    .add(state.settings.scene3, 'shape', { Straight: 'straight', Arc: 'arc', 'S-curve': 'scurve' })
+    .name('Shape');
+  roadFolder.add(state.settings.scene3, 'length', 50, 400, 10).name('Length (m)');
+  roadFolder.add(state.settings.scene3, 'radius', 20, 100, 5).name('Radius (m)');
+  roadFolder.add(state.settings.scene3, 'angle', 30, 180, 5).name('Angle (°)');
+  roadFolder.add(state.settings.scene3, 'lanesForward', 1, 3, 1).name('Lanes forward');
+  roadFolder.add(state.settings.scene3, 'lanesBackward', 0, 3, 1).name('Lanes back (0=one-way)');
 
   const lightFolder = gui.addFolder('Traffic light');
   lightFolder
