@@ -14,8 +14,10 @@ import {
   intersectionPhaseAt,
   leftTurnYieldObstacles,
   STOP_BACK,
+  turnArcSpec,
   type IntersectionConfig,
   type IntersectionState,
+  type Way,
 } from './intersection';
 import { buildNetwork, locate, stepNetwork, type NetObstacle, type Network } from './network';
 import { Road } from './road';
@@ -254,8 +256,10 @@ console.log('Network checks passed');
 }
 
 const OPEN = { n: 'open', e: 'open', s: 'open', w: 'open' } as const;
-const intersectionOf = (closed: IntersectionConfig['closed'] = { ...OPEN }): IntersectionState =>
-  buildIntersection({ approach: 80, lanesEachWay: 1, closed });
+const intersectionOf = (
+  closed: IntersectionConfig['closed'] = { ...OPEN },
+  lanesEachWay = 1,
+): IntersectionState => buildIntersection({ approach: 80, lanesEachWay, closed });
 
 // nsGreen: a car on the S approach crosses the zone onto the N road.
 {
@@ -334,7 +338,7 @@ const signalWithYield = (state: IntersectionState, cars: Car[]): NetObstacle[] =
 {
   const state = intersectionOf();
   const nBack = state.net.laneOffsets[state.roadIndex.n] + 1;
-  const cars = [newCar(60, 12, 0, 2), newCar(30, 12, nBack, 0)]; // S-left + N backward opposing
+  const cars = [newCar(60, 12, 0, 2), newCar(30, 12, nBack, 0)]; // S-left + N backward opposing (ETA ~2.5 s)
   const stopLine = 80 - STOP_BACK;
   for (let step = 0; step < 2 * 60; step++) {
     stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
@@ -346,67 +350,84 @@ const signalWithYield = (state: IntersectionState, cars: Car[]): NetObstacle[] =
   assert(locate(state.net, cars[0].lane).road === state.roadIndex.e, `S car turned left onto E after yielding (road ${locate(state.net, cars[0].lane).road})`);
 }
 
+// Gap acceptance: a far opponent (ETA > 4.5 s) does not hold the turn.
+{
+  const state = intersectionOf();
+  const nBack = state.net.laneOffsets[state.roadIndex.n] + 1;
+  const cars = [newCar(60, 12, 0, 2), newCar(75, 12, nBack, 0)]; // opponent 75 m out, ETA ~6 s
+  let crossed = false;
+  for (let step = 0; step < 4 * 60; step++) {
+    stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
+    if (locate(state.net, cars[0].lane).road !== state.roadIndex.s) crossed = true;
+  }
+  assert(crossed, 'left turn went through a safe gap');
+}
+
+// Gap acceptance: a stopped opponent near the zone does not hold the turn.
+{
+  const state = intersectionOf();
+  const nBack = state.net.laneOffsets[state.roadIndex.n] + 1;
+  const cars = [newCar(60, 12, 0, 2), newCar(10, 0, nBack, 0)]; // opponent parked, v = 0
+  let crossed = false;
+  for (let step = 0; step < 6 * 60; step++) {
+    stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
+    if (locate(state.net, cars[0].lane).road !== state.roadIndex.s) crossed = true;
+  }
+  assert(crossed, 'left turn went past a stopped opponent');
+}
+
 console.log('Turn checks passed');
 
 // ---------------------------------------------------------------------------
-// Turn-arc geometry: every arc's end pose must land on its exit lane, for both
-// driving sides (the bug the topology checks could not see).
+// Turn-arc geometry: every arc's end pose must equal the solver's exit pose, for
+// any lane count and driving side.
 // ---------------------------------------------------------------------------
 {
-  // End poses per driving side (turn lanes mirror across each road's centerline).
-  const tables: Record<number, [number, number, number, number][]> = {
-    '1': [
-      [-4, -2, -1, 0], // S right → W
-      [4, 2, 1, 0], // S left → E
-      [4, 2, 1, 0], // N right → E
-      [-4, -2, -1, 0], // N left → W
-      [2, -4, 0, -1], // E right → S
-      [-2, 4, 0, 1], // E left → N
-      [-2, 4, 0, 1], // W right → N
-      [2, -4, 0, -1], // W left → S
-    ],
-    '-1': [
-      [-4, 2, -1, 0], // S right → W
-      [4, -2, 1, 0], // S left → E
-      [4, -2, 1, 0], // N right → E
-      [-4, 2, -1, 0], // N left → W
-      [-2, -4, 0, -1], // E right → S
-      [2, 4, 0, 1], // E left → N
-      [2, 4, 0, 1], // W right → N
-      [-2, -4, 0, -1], // W left → S
-    ],
-  };
-  for (const handed of [1, -1]) {
-    buildScene4({ approach: 80, lanesEachWay: 1, closed: { n: 'open', e: 'open', s: 'open', w: 'open' } }, handed);
-    const def = SCENES[3];
-    const net = scene4State.state!.net;
-    const expected = handed === 1 ? tables[1] : tables[-1];
-    const arcKeys = ['sRight', 'sLeft', 'nRight', 'nLeft', 'eRight', 'eLeft', 'wRight', 'wLeft'];
-    for (let k = 0; k < 8; k++) {
-      const roadIdx = scene4State.state!.roadIndex[arcKeys[k]];
-      const g = net.laneOffsets[roadIdx];
-      const car: Car = {
-        s: net.roads[roadIdx].length,
-        v: 10,
-        a: 0,
-        lane: g,
-        route: 0,
-        lateral: g,
-        lateralVel: 0,
-        laneFrom: g,
-        laneProgress: 1,
-        cooldown: 0,
-      };
-      const pose = def.carPose(car);
-      const [ex, ez, ehx, ehz] = expected[k];
-      assert(
-        Math.abs(pose.x - ex) < 1 && Math.abs(pose.z - ez) < 1,
-        `arc ${arcKeys[k]} ends at its exit lane (handed ${handed}, got ${pose.x.toFixed(1)}, ${pose.z.toFixed(1)})`,
-      );
-      assert(
-        Math.abs(Math.cos(pose.angle) - ehx) < 0.2 && Math.abs(-Math.sin(pose.angle) - ehz) < 0.2,
-        `arc ${arcKeys[k]} exits with the right heading (handed ${handed})`,
-      );
+  const MOVES: [Way, Way, 'right' | 'left'][] = [
+    ['s', 'w', 'right'],
+    ['s', 'e', 'left'],
+    ['n', 'e', 'right'],
+    ['n', 'w', 'left'],
+    ['e', 's', 'right'],
+    ['e', 'n', 'left'],
+    ['w', 'n', 'right'],
+    ['w', 's', 'left'],
+  ];
+  for (const lanesEachWay of [1, 2]) {
+    for (const handed of [1, -1]) {
+      buildScene4({ approach: 80, lanesEachWay, closed: { n: 'open', e: 'open', s: 'open', w: 'open' } }, handed);
+      const def = SCENES[3];
+      const net = scene4State.state!.net;
+      for (const [from, to, kind] of MOVES) {
+        const spec = turnArcSpec(from, to, kind, lanesEachWay, handed);
+        const key = `${from}${kind === 'right' ? 'Right' : 'Left'}`;
+        const roadIdx = scene4State.state!.roadIndex[key];
+        const g = net.laneOffsets[roadIdx];
+        const car: Car = {
+          s: net.roads[roadIdx].length,
+          v: 10,
+          a: 0,
+          lane: g,
+          route: 0,
+          lateral: g,
+          lateralVel: 0,
+          laneFrom: g,
+          laneProgress: 1,
+          cooldown: 0,
+        };
+        const pose = def.carPose(car);
+        assert(
+          Math.abs(pose.x - spec.exit.x) < 0.75 && Math.abs(pose.z - spec.exit.z) < 0.75,
+          `${key} ends at the matching lane (lanes ${lanesEachWay}, handed ${handed}; got ${pose.x.toFixed(1)},${pose.z.toFixed(1)} want ${spec.exit.x.toFixed(1)},${spec.exit.z.toFixed(1)})`,
+        );
+        assert(
+          Math.abs(Math.cos(pose.angle) - spec.exit.hx) < 0.2 && Math.abs(-Math.sin(pose.angle) - spec.exit.hz) < 0.2,
+          `${key} exits with the right heading (lanes ${lanesEachWay}, handed ${handed})`,
+        );
+        // The sim connection must land on the matching lane index too.
+        const conn = net.exit[roadIdx][0][0];
+        assert(conn !== null && conn.toLane === spec.dstLane, `${key} connects to the matching lane index`);
+      }
     }
   }
   console.log('Turn geometry checks passed');
@@ -487,3 +508,39 @@ console.log('Turn checks passed');
 }
 
 console.log('Closure checks passed');
+
+// ---------------------------------------------------------------------------
+// Lane changes near intersections (route meaning is lane-indexed)
+// ---------------------------------------------------------------------------
+
+// No lane changes within 40 m of the lane end, even to pass a slow leader.
+{
+  const road = new Road({ shape: 'straight', length: 120, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 });
+  const net = netOf(road);
+  const cars = [newCar(55, 8, 0), newCar(0, 30, 0)]; // slow leader, fast follower on lane 0
+  const slowpokes: IdmParams = { ...slow, v0: 8 };
+  let lateChange = false;
+  for (let step = 0; step < 30 * 60; step++) {
+    const before = cars[1].lane;
+    stepNetwork(net, cars, [slowpokes, fast], CAR_LENGTH, 1 / 60);
+    if (cars[1].s > 40 && cars[1].lane !== before) lateChange = true;
+  }
+  assert(!lateChange, 'no lane changes within 40 m of the lane end');
+}
+
+// The T-intersection trap: a right-routed car baited into the inner lane must not
+// park at the zone edge — it turns (or takes the remapped route) instead.
+{
+  const state = intersectionOf({ n: 'both', e: 'open', s: 'open', w: 'open' }, 2);
+  const sOuter = state.net.laneOffsets[state.roadIndex.s] + 1; // S forward outer lane (of 2)
+  const slowpokes: IdmParams = { ...slow, v0: 8 };
+  const cars = [newCar(10, 25, sOuter, 1), newCar(35, 8, sOuter, 1)]; // fast right-turner behind a slow car
+  for (let step = 0; step < 45 * 60; step++) {
+    stepNetwork(state.net, cars, [fast, slowpokes], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
+  }
+  const { road } = locate(state.net, cars[0].lane);
+  const parkedAtEdge = road === state.roadIndex.s && cars[0].s > 74 && cars[0].v < 0.01;
+  assert(!parkedAtEdge, `turning car did not park at the zone edge (road ${road}, s=${cars[0].s.toFixed(1)})`);
+}
+
+console.log('Lane-commit checks passed');

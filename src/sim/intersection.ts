@@ -18,12 +18,63 @@ import {
 import { Road } from './road';
 
 export type WayState = 'open' | 'in' | 'out' | 'both';
+export type Way = 'n' | 'e' | 's' | 'w';
 
 export interface IntersectionConfig {
   approach: number; // m, length of each approach road
   lanesEachWay: number; // lanes per direction on every approach
   /** Per way: open / entry closed / exit closed / fully closed (not built). */
   closed: { n: WayState; e: WayState; s: WayState; w: WayState };
+}
+
+export interface Pose2 {
+  x: number;
+  z: number;
+  hx: number;
+  hz: number;
+}
+
+export interface TurnSpec {
+  radius: number;
+  entry: Pose2;
+  exit: Pose2;
+  srcLane: number;
+  dstLane: number;
+}
+
+/**
+ * Solves one turn movement's arc geometry: the entry pose on the source lane, the
+ * exit pose on the matching destination lane (outer → outer, inner → inner), and the
+ * arc radius that joins them with a 90° sweep. All numeric — no hand-tuned radii.
+ */
+export function turnArcSpec(from: Way, to: Way, kind: 'right' | 'left', lanes: number, handed: number): TurnSpec {
+  const zoneHalf = 4 * lanes;
+  const geom: Record<Way, { edge: [number, number]; h: [number, number]; r: [number, number] }> = {
+    s: { edge: [0, -zoneHalf], h: [0, 1], r: [-1, 0] },
+    n: { edge: [0, zoneHalf], h: [0, 1], r: [-1, 0] },
+    e: { edge: [zoneHalf, 0], h: [1, 0], r: [0, 1] },
+    w: { edge: [-zoneHalf, 0], h: [1, 0], r: [0, 1] },
+  };
+  const enteringDir = (way: Way): number => (way === 'n' || way === 'e' ? -1 : 1);
+  const dirF = enteringDir(from);
+  const dirT = -enteringDir(to);
+  // Right turns from the outermost lane, left turns from the innermost, both sides.
+  const srcLane = kind === 'right' ? (dirF > 0 ? lanes - 1 : 2 * lanes - 1) : dirF > 0 ? 0 : lanes;
+  const dstLane = kind === 'right' ? (dirT > 0 ? lanes - 1 : 2 * lanes - 1) : dirT > 0 ? 0 : lanes;
+  const o1 = dirF > 0 ? (2 + 4 * srcLane) * handed : -(2 + 4 * (srcLane - lanes)) * handed;
+  const o2 = dirT > 0 ? (2 + 4 * dstLane) * handed : -(2 + 4 * (dstLane - lanes)) * handed;
+  const g1 = geom[from];
+  const g2 = geom[to];
+  const h1: [number, number] = [g1.h[0] * dirF, g1.h[1] * dirF];
+  const h2: [number, number] = [g2.h[0] * dirT, g2.h[1] * dirT];
+  const entry: Pose2 = { x: g1.edge[0] + g1.r[0] * o1, z: g1.edge[1] + g1.r[1] * o1, hx: h1[0], hz: h1[1] };
+  const exit: Pose2 = { x: g2.edge[0] + g2.r[0] * o2, z: g2.edge[1] + g2.r[1] * o2, hx: h2[0], hz: h2[1] };
+  // 90° turn: the arc center is entry + R·n where n is the turn-side normal of h1.
+  // Solve for R so that the exit point is on the circle and perpendicular to h2.
+  const n = kind === 'right' ? [-h1[1], h1[0]] : [h1[1], -h1[0]];
+  const denom = n[0] * h2[0] + n[1] * h2[1];
+  const radius = Math.max(Math.abs(((exit.x - entry.x) * h2[0] + (exit.z - entry.z) * h2[1]) / denom), 1.5);
+  return { radius, entry, exit, srcLane, dstLane };
 }
 
 export interface IntersectionState {
@@ -39,8 +90,6 @@ export interface IntersectionState {
 
 /** Distance from the zone edge to the stop line (leaves room for the crosswalk after it). */
 export const STOP_BACK = 4.5;
-
-type Way = 'n' | 'e' | 's' | 'w';
 
 export function buildIntersection(cfg: IntersectionConfig, handed = 1): IntersectionState {
   const lanes = cfg.lanesEachWay;
@@ -86,22 +135,20 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
   if ((canEnter('s') && canExit('n')) || (canEnter('n') && canExit('s'))) add('nsConn', mk(zoneHalf * 2));
   if ((canEnter('w') && canExit('e')) || (canEnter('e') && canExit('w'))) add('ewConn', mk(zoneHalf * 2));
 
-  // Turn arcs: right turns hug the near corner, left turns swing wide — but with
-  // left-hand traffic the turn lanes sit on the far side, so the radii swap.
-  const rRight = handed > 0 ? 2 : 6;
-  const rLeft = handed > 0 ? 6 : 2;
-  const moves: { key: string; from: Way; to: Way; r: number; angle: number }[] = [
-    { key: 'sRight', from: 's', to: 'w', r: rRight, angle: 90 },
-    { key: 'sLeft', from: 's', to: 'e', r: rLeft, angle: -90 },
-    { key: 'nRight', from: 'n', to: 'e', r: rRight, angle: 90 },
-    { key: 'nLeft', from: 'n', to: 'w', r: rLeft, angle: -90 },
-    { key: 'eRight', from: 'e', to: 's', r: rRight, angle: 90 },
-    { key: 'eLeft', from: 'e', to: 'n', r: rLeft, angle: -90 },
-    { key: 'wRight', from: 'w', to: 'n', r: rRight, angle: 90 },
-    { key: 'wLeft', from: 'w', to: 's', r: rLeft, angle: -90 },
+  // Turn arcs: radius solved per movement from the entry/exit lane geometry, so
+  // multi-lane intersections curve onto the matching lane instead of guessing radii.
+  const moves: { key: string; from: Way; to: Way; spec: TurnSpec }[] = [
+    { key: 'sRight', from: 's', to: 'w', spec: turnArcSpec('s', 'w', 'right', lanes, handed) },
+    { key: 'sLeft', from: 's', to: 'e', spec: turnArcSpec('s', 'e', 'left', lanes, handed) },
+    { key: 'nRight', from: 'n', to: 'e', spec: turnArcSpec('n', 'e', 'right', lanes, handed) },
+    { key: 'nLeft', from: 'n', to: 'w', spec: turnArcSpec('n', 'w', 'left', lanes, handed) },
+    { key: 'eRight', from: 'e', to: 's', spec: turnArcSpec('e', 's', 'right', lanes, handed) },
+    { key: 'eLeft', from: 'e', to: 'n', spec: turnArcSpec('e', 'n', 'left', lanes, handed) },
+    { key: 'wRight', from: 'w', to: 'n', spec: turnArcSpec('w', 'n', 'right', lanes, handed) },
+    { key: 'wLeft', from: 'w', to: 's', spec: turnArcSpec('w', 's', 'left', lanes, handed) },
   ];
   for (const m of moves) {
-    if (canEnter(m.from) && canExit(m.to)) add(m.key, mkArc(m.r, m.angle));
+    if (canEnter(m.from) && canExit(m.to)) add(m.key, mkArc(m.spec.radius, m.key.endsWith('Right') ? 90 : -90));
   }
 
   const links: RoadLink[] = [];
@@ -117,6 +164,14 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
     if (has(m.key) && has(m.to)) links.push([roadIndex[m.key], roadIndex[m.to], 1, m.to === 'w' || m.to === 's' ? 1 : 0] as RoadLink);
   }
   const net = buildNetwork(roads, links);
+
+  // Turn arcs exit onto the matching destination lane (outer → outer, inner → inner).
+  for (const m of moves) {
+    if (has(m.key)) {
+      const conn = net.exit[roadIndex[m.key]][0][0];
+      if (conn) conn.toLane = m.spec.dstLane;
+    }
+  }
 
   // Exit-closed ways: nothing may flow into them.
   for (const way of ['s', 'n', 'e', 'w'] as Way[]) {
@@ -281,13 +336,14 @@ export function intersectionLampColor(
   }
 }
 
-const YIELD_DIST = 45; // m: opposing traffic closer than this to the zone blocks a left turn
-const YIELD_MIN_SPEED = 1; // m/s: stopped opponents don't block
+const YIELD_ETA = 4.5; // s: block a left turn when an opponent arrives sooner than this
+const YIELD_MIN_SPEED = 1; // m/s: stopped opponents never block
 
 /**
- * Stop-line obstacles for left-turning cars that must give way: a left-routed car on
- * an approach is held at its stop line while an opposing-stream car is approaching
- * the zone (and actually moving).
+ * Gap-acceptance yield for left turns (replaces a blunt distance rule that starved
+ * turns under continuous opposing traffic): a left-routed car is held at its stop
+ * line only while an opposing-stream car is moving AND either inside the zone or
+ * arriving at it within YIELD_ETA seconds.
  */
 export function leftTurnYieldObstacles(state: IntersectionState, cars: Car[]): NetObstacle[] {
   const out: NetObstacle[] = [];
@@ -303,8 +359,9 @@ export function leftTurnYieldObstacles(state: IntersectionState, cars: Car[]): N
         if (j === i || other.lane !== lane || other.v < YIELD_MIN_SPEED) return false;
         const ol = locate(state.net, lane);
         const oRoad = state.net.roads[ol.road];
+        const inZone = oRoad.length <= 2 * state.zoneHalf; // connector or turn arc: inside the zone
         const dist = oRoad.lanes[ol.lane].direction > 0 ? oRoad.length - other.s : other.s;
-        return dist < YIELD_DIST;
+        return inZone || dist < Math.max(other.v, 1) * YIELD_ETA; // arriving within YIELD_ETA seconds
       }),
     );
     if (blocked) out.push(entry);

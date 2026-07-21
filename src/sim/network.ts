@@ -190,6 +190,8 @@ function accelToward(
     : idmAcceleration(car.v, 1e6, 0, p);
 }
 
+const LANE_CHANGE_MIN_DIST = 40; // m: no lane changes this close to the lane end
+
 /** MOBIL-lite lane changes, scoped to adjacent same-direction lanes on the same road. */
 function updateNetworkLanes(net: Network, cars: Car[], params: IdmParams[], carLength: number): void {
   for (let i = 0; i < cars.length; i++) {
@@ -198,6 +200,11 @@ function updateNetworkLanes(net: Network, cars: Car[], params: IdmParams[], carL
     const { road: ri, lane: li } = locate(net, car.lane);
     const road = net.roads[ri];
     const dir = road.lanes[li].direction;
+    // A route's meaning is lane-indexed, so changing lanes near an exit can strand a
+    // car on a lane where its route doesn't exist (e.g. a turning car stuck going
+    // straight). Like real drivers, cars commit to their lane before the intersection.
+    const distToExit = dir > 0 ? road.length - car.s : car.s;
+    if (distToExit < LANE_CHANGE_MIN_DIST) continue;
     const accelHere = accelToward(car, nearestInLane(net, cars, i, ri, li, dir, true), carLength, params[i]);
     let bestTarget = -1;
     let bestAccel = accelHere + DELTA_A;
@@ -219,6 +226,14 @@ function updateNetworkLanes(net: Network, cars: Car[], params: IdmParams[], carL
       bestAccel = accelThere;
     });
     if (bestTarget >= 0) {
+      // If the car's route doesn't exist on the new lane, take what the lane offers
+      // (wrong lane for the turn → go wherever the lane goes).
+      const conns = net.exit[ri][bestTarget];
+      const usable = conns.length > 0 && conns[Math.min(car.route, conns.length - 1)];
+      if (!usable) {
+        const fallback = conns.findIndex((c) => c !== null);
+        car.route = fallback >= 0 ? fallback : 0;
+      }
       car.lane = globalLane(net, ri, bestTarget);
       car.cooldown = LANE_CHANGE_COOLDOWN;
       car.laneFrom = car.lateral;
