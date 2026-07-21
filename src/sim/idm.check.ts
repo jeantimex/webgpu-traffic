@@ -3,7 +3,8 @@
  * Run: node_modules/.bin/esbuild src/sim/idm.check.ts --bundle --format=esm --outfile=.idm.check.mjs && node .idm.check.mjs && rm .idm.check.mjs
  */
 import { idmAcceleration, stepRing, type Car, type IdmParams } from './idm';
-import { Road, stepRoad } from './road';
+import { buildNetwork, stepNetwork, type Network } from './network';
+import { Road } from './road';
 
 function assert(cond: boolean, msg: string): void {
   if (!cond) throw new Error(`IDM check failed: ${msg}`);
@@ -71,7 +72,7 @@ assert(
 console.log(`IDM checks passed (min gap ${minGap.toFixed(2)} m, settled at ${cars[0].v.toFixed(2)} m/s)`);
 
 // ---------------------------------------------------------------------------
-// Road (scene 3 building block)
+// Road + Network (building blocks)
 // ---------------------------------------------------------------------------
 
 const newCar = (s: number, v: number, lane: number): Car => ({
@@ -85,6 +86,8 @@ const newCar = (s: number, v: number, lane: number): Car => ({
   laneProgress: 1,
   cooldown: 0,
 });
+
+const netOf = (...roads: Road[]): Network => buildNetwork(roads, roads.length > 1 ? [[0, 1]] : []);
 
 // Path geometry: unit headings, continuous tangent (arc & S-curve derived by hand).
 for (const shape of ['arc', 'scurve'] as const) {
@@ -105,23 +108,38 @@ for (const shape of ['arc', 'scurve'] as const) {
   assert(Math.abs(end.hx - 1) < 1e-9 && Math.abs(end.hz) < 1e-9, 'scurve ends parallel to its start');
 }
 
+// Negative angle: the arc turns right (heading angle decreases) and mirrors the left arc.
+{
+  const left = new Road({ shape: 'arc', radius: 50, angle: 60, length: 0, lanesForward: 1, lanesBackward: 0 });
+  const right = new Road({ shape: 'arc', radius: 50, angle: -60, length: 0, lanesForward: 1, lanesBackward: 0 });
+  assert(Math.abs(right.length - left.length) < 1e-9, 'same length for ±angle');
+  const startAngle = Math.atan2(right.point(0).hz, right.point(0).hx);
+  const endAngle = Math.atan2(right.point(right.length).hz, right.point(right.length).hx);
+  assert(endAngle < startAngle, 'negative angle turns right');
+  for (let s = 0; s <= right.length; s += 10) {
+    const pl = left.point(s);
+    const pr = right.point(s);
+    assert(Math.abs(pr.x - pl.x) < 1e-9 && Math.abs(pr.z + pl.z) < 1e-9, `mirror at s=${s}`);
+  }
+}
+
 // Open end is a full stop: a car must stop just before the road end.
 {
-  const road = new Road({ shape: 'straight', length: 120, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 0 });
+  const net = netOf(new Road({ shape: 'straight', length: 120, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 0 }));
   const car = [newCar(0, 20, 0)];
-  for (let step = 0; step < 30 * 60; step++) stepRoad(road, car, [fast], CAR_LENGTH, 1 / 60);
+  for (let step = 0; step < 30 * 60; step++) stepNetwork(net, car, [fast], CAR_LENGTH, 1 / 60);
   assert(car[0].v < 0.01, `stopped at road end (v=${car[0].v.toFixed(3)})`);
   assert(car[0].s > 112 && car[0].s < 118, `stopped just before the end (s=${car[0].s.toFixed(2)})`);
 }
 
 // One lane, no way around: fast car settles behind the slow one (mean speed over the last 10 s).
 {
-  const road = new Road({ shape: 'straight', length: 1500, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 0 });
+  const net = netOf(new Road({ shape: 'straight', length: 1500, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 0 }));
   const platoon = [newCar(0, 30, 0), newCar(150, 12, 0)];
   let vSum = 0;
   let vN = 0;
   for (let step = 0; step < 90 * 60; step++) {
-    stepRoad(road, platoon, [fast, slow], CAR_LENGTH, 1 / 60);
+    stepNetwork(net, platoon, [fast, slow], CAR_LENGTH, 1 / 60);
     if (step >= 80 * 60) {
       vSum += platoon[0].v;
       vN++;
@@ -132,12 +150,12 @@ for (const shape of ['arc', 'scurve'] as const) {
 
 // Two lanes one-way: fast car changes lanes to overtake.
 {
-  const road = new Road({ shape: 'straight', length: 400, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 });
+  const net = netOf(new Road({ shape: 'straight', length: 400, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 }));
   const race = [newCar(0, 30, 0), newCar(150, 12, 0)];
   let changed = false;
   let maxV = 0;
   for (let step = 0; step < 12 * 60; step++) {
-    stepRoad(road, race, [fast, slow], CAR_LENGTH, 1 / 60);
+    stepNetwork(net, race, [fast, slow], CAR_LENGTH, 1 / 60);
     if (race[0].lane !== 0) changed = true;
     maxV = Math.max(maxV, race[0].v);
   }
@@ -148,14 +166,58 @@ for (const shape of ['arc', 'scurve'] as const) {
 // Two-way: opposing traffic does not interact.
 {
   const p20: IdmParams = { ...fast, v0: 20 };
-  const road = new Road({ shape: 'straight', length: 1000, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 1 });
+  const net = netOf(new Road({ shape: 'straight', length: 1000, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 1 }));
   const both = [newCar(50, 20, 0), newCar(950, 20, 1)];
   let maxDev = 0;
   for (let step = 0; step < 22 * 60; step++) {
-    stepRoad(road, both, [p20, p20], CAR_LENGTH, 1 / 60);
+    stepNetwork(net, both, [p20, p20], CAR_LENGTH, 1 / 60);
     maxDev = Math.max(maxDev, Math.abs(both[0].v - 20), Math.abs(both[1].v - 20));
   }
   assert(maxDev < 0.5, `opposing cars unaffected (max deviation ${maxDev.toFixed(2)} m/s)`);
 }
 
-console.log('Road checks passed');
+// Seam: a car crosses from road A to road B without slowing (no stop at the connection).
+// Measured at the crossing moment, before braking for B's far end begins.
+{
+  const a = new Road({ shape: 'straight', length: 150, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 0 });
+  const b = new Road({ shape: 'straight', length: 150, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 0 });
+  const net = buildNetwork([a, b], [[0, 1]]);
+  const car = [newCar(0, 12, 0)];
+  let crossV = -1;
+  for (let step = 0; step < 14 * 60; step++) {
+    stepNetwork(net, car, [slow], CAR_LENGTH, 1 / 60);
+    if (car[0].lane === 1 && crossV < 0) crossV = car[0].v;
+  }
+  assert(car[0].lane === 1, `car is on road B (lane ${car[0].lane})`);
+  assert(crossV > 11, `no slowdown at the seam (crossed at v=${crossV.toFixed(2)})`);
+  assert(car[0].s > 10 && car[0].s < 25, `position carried across (s=${car[0].s.toFixed(1)} on B)`);
+}
+
+// Seam: the stop at the far end propagates upstream — a car on A queues behind one stopped on B.
+{
+  const a = new Road({ shape: 'straight', length: 150, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 0 });
+  const b = new Road({ shape: 'straight', length: 30, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 0 });
+  const net = buildNetwork([a, b], [[0, 1]]);
+  const queue = [newCar(0, 20, 0), newCar(25, 10, 1)]; // car 1 starts on B near its end
+  for (let step = 0; step < 30 * 60; step++) stepNetwork(net, queue, [fast, slow], CAR_LENGTH, 1 / 60);
+  assert(queue[0].v < 0.01 && queue[1].v < 0.01, 'both cars stopped');
+  const seamGap = (150 - queue[0].s) + queue[1].s - CAR_LENGTH;
+  assert(queue[1].lane === 1 && seamGap > 0, `no collision across the seam (gap ${seamGap.toFixed(2)} m)`);
+}
+
+// Seam, two-way: a backward car crosses from B into A's backward lane.
+{
+  const a = new Road({ shape: 'straight', length: 150, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 1 });
+  const b = new Road({ shape: 'straight', length: 150, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 1 });
+  const net = buildNetwork([a, b], [[0, 1]]);
+  const car = [newCar(140, 20, 3)]; // B's backward lane (global lane 3)
+  let crossV = -1;
+  for (let step = 0; step < 12 * 60; step++) {
+    stepNetwork(net, car, [fast], CAR_LENGTH, 1 / 60);
+    if (car[0].lane === 1 && crossV < 0) crossV = car[0].v;
+  }
+  assert(car[0].lane === 1, `car crossed into A's backward lane (lane ${car[0].lane})`);
+  assert(crossV > 18, `no slowdown at the seam (crossed at v=${crossV.toFixed(2)})`);
+}
+
+console.log('Network checks passed');

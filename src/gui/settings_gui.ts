@@ -10,6 +10,7 @@ export interface TrafficSettings {
   light: { green: number; yellow: number; red: number; override: 'auto' | 'green' | 'yellow' | 'red' };
   cars: IdmParams[];
   scene3: RoadConfig;
+  scene3B: RoadConfig;
 }
 
 export interface GuiState {
@@ -44,6 +45,7 @@ export function setupGui(): GuiState {
         { v0: 25, T: 1.5, a: 2.2, b: 2.8, s0: 2, delta: 4 },
       ],
       scene3: { shape: 'straight', length: 150, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 },
+      scene3B: { shape: 'arc', length: 150, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 },
     },
     telemetry: { speeds: {}, light: '' },
     selectedCar: 0,
@@ -62,24 +64,28 @@ export function setupGui(): GuiState {
   gui.add(state.settings, 'carLength', 3, 8, 0.5).name('Vehicle length (m)');
   gui.add(state.settings, 'dayMode').name('Daylight');
 
-  const roadFolder = gui.addFolder('Road (scene 3)');
-  const shapeController = roadFolder
-    .add(state.settings.scene3, 'shape', { Straight: 'straight', Arc: 'arc', 'S-curve': 'scurve' })
-    .name('Shape');
-  const lengthController = roadFolder.add(state.settings.scene3, 'length', 50, 400, 10).name('Length (m)');
-  const radiusController = roadFolder.add(state.settings.scene3, 'radius', 20, 100, 5).name('Radius (m)');
-  const angleController = roadFolder.add(state.settings.scene3, 'angle', 30, 180, 5).name('Angle (°)');
-  // Only the parameters of the selected shape are shown (length for straight, radius/angle for curves).
-  const updateRoadControlVisibility = (): void => {
-    const straight = state.settings.scene3.shape === 'straight';
-    lengthController.show(straight);
-    radiusController.show(!straight);
-    angleController.show(!straight);
+  const addRoadFolder = (title: string, config: RoadConfig): void => {
+    const folder = gui.addFolder(title);
+    const shapeController = folder
+      .add(config, 'shape', { Straight: 'straight', Arc: 'arc', 'S-curve': 'scurve' })
+      .name('Shape');
+    const lengthController = folder.add(config, 'length', 50, 400, 10).name('Length (m)');
+    const radiusController = folder.add(config, 'radius', 20, 100, 5).name('Radius (m)');
+    const angleController = folder.add(config, 'angle', -180, 180, 5).name('Angle (°)');
+    // Only the parameters of the selected shape are shown (length for straight, radius/angle for curves).
+    const updateVisibility = (): void => {
+      const straight = config.shape === 'straight';
+      lengthController.show(straight);
+      radiusController.show(!straight);
+      angleController.show(!straight);
+    };
+    shapeController.onChange(updateVisibility);
+    updateVisibility();
+    folder.add(config, 'lanesForward', 1, 3, 1).name('Lanes forward');
+    folder.add(config, 'lanesBackward', 0, 3, 1).name('Lanes back (0=one-way)');
   };
-  shapeController.onChange(updateRoadControlVisibility);
-  updateRoadControlVisibility();
-  roadFolder.add(state.settings.scene3, 'lanesForward', 1, 3, 1).name('Lanes forward');
-  roadFolder.add(state.settings.scene3, 'lanesBackward', 0, 3, 1).name('Lanes back (0=one-way)');
+  addRoadFolder('Road A (scene 3)', state.settings.scene3);
+  addRoadFolder('Road B (scene 3)', state.settings.scene3B);
 
   const lightFolder = gui.addFolder('Traffic light');
   lightFolder

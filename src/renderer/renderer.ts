@@ -1,10 +1,19 @@
 import { MAX_CARS, NEW_CAR_PARAMS, type GuiState } from '../gui/settings_gui';
 import { type Car, type IdmParams, type Obstacle } from '../sim/idm';
-import { Road } from '../sim/road';
+import { locate } from '../sim/network';
 import { identity, lookAt, multiply, perspective, rotationZ, translationRotationY } from '../utils/mat4';
 import { OrbitCamera } from '../utils/orbit';
 import { createBufferWithData, resizeCanvasToDisplaySize, type WebGPUState } from '../webgpu/utils';
-import { PALETTES, SCENES, pushBox, scene3State, type Palette, type SceneDef, type Vec3 } from './scenes';
+import {
+  buildScene3,
+  PALETTES,
+  SCENES,
+  pushBox,
+  scene3State,
+  type Palette,
+  type SceneDef,
+  type Vec3,
+} from './scenes';
 
 const trafficShader = /* wgsl */ `
   struct Camera {
@@ -134,8 +143,8 @@ export class Renderer {
 
     this.scene = gui.settings.scene;
     if (this.scene === 3) {
-      scene3State.road = new Road(this.gui.settings.scene3);
-      this.roadKey = JSON.stringify(this.gui.settings.scene3);
+      buildScene3(this.gui.settings.scene3, this.gui.settings.scene3B);
+      this.roadKey = JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B]);
     }
     this.def = SCENES[this.scene - 1];
 
@@ -256,8 +265,8 @@ export class Renderer {
   private applyScene(scene: number): void {
     this.scene = scene;
     if (scene === 3) {
-      scene3State.road = new Road(this.gui.settings.scene3);
-      this.roadKey = JSON.stringify(this.gui.settings.scene3);
+      buildScene3(this.gui.settings.scene3, this.gui.settings.scene3B);
+      this.roadKey = JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B]);
     }
     this.def = SCENES[scene - 1];
     const staticVerts = this.def.buildStatic(this.palette());
@@ -275,25 +284,31 @@ export class Renderer {
 
   /**
    * Places all cars for the current scene. Ring scenes deal fixed pairs per lane;
-   * scene 3 deals round-robin over every lane, so a freshly enabled backward
-   * direction immediately gets opposing traffic.
+   * scene 3 deals round-robin over every network lane, spread along each lane's road.
    */
   private resetCars(): void {
     const c = this.def.c;
-    const numLanes = this.scene === 3 ? (scene3State.road?.lanes.length ?? 1) : 2;
+    const net = this.scene === 3 ? scene3State.net : null;
+    const numLanes = net ? net.numLanes : 2;
     const laneFor = (i: number): number =>
-      this.scene === 3 ? i % numLanes : START_LANES[i % START_LANES.length] % numLanes;
-    this.cars = this.gui.settings.cars.map((params, i) => ({
-      s: START_FRACTIONS[i % START_FRACTIONS.length] * c,
-      v: params.v0,
-      a: 0,
-      lane: laneFor(i),
-      lateral: laneFor(i),
-      lateralVel: 0,
-      laneFrom: laneFor(i),
-      laneProgress: 1,
-      cooldown: 0,
-    }));
+      net ? i % numLanes : START_LANES[i % START_LANES.length] % numLanes;
+    this.cars = this.gui.settings.cars.map((params, i) => {
+      const lane = laneFor(i);
+      const span = net
+        ? net.roads[locate(net, lane).road].length
+        : c;
+      return {
+        s: START_FRACTIONS[i % START_FRACTIONS.length] * span,
+        v: params.v0,
+        a: 0,
+        lane,
+        lateral: lane,
+        lateralVel: 0,
+        laneFrom: lane,
+        laneProgress: 1,
+        cooldown: 0,
+      };
+    });
     this.carParams = [...this.gui.settings.cars];
   }
 
@@ -335,9 +350,9 @@ export class Renderer {
 
   private readonly render = (now: number): void => {
     if (this.gui.settings.scene !== this.scene) this.applyScene(this.gui.settings.scene);
-    // Scene 3's road is user-configurable: any change clears traffic and re-deals fresh cars.
+    // Scene 3's roads are user-configurable: any change clears traffic and re-deals fresh cars.
     if (this.scene === 3) {
-      const key = JSON.stringify(this.gui.settings.scene3);
+      const key = JSON.stringify([this.gui.settings.scene3, this.gui.settings.scene3B]);
       if (key !== this.roadKey) this.applyScene(3);
     }
 

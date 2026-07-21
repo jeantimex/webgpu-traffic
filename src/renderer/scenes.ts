@@ -6,7 +6,15 @@ import {
   type IdmParams,
   type Obstacle,
 } from '../sim/idm';
-import { Road, roadGapAhead, roadSpawnSlot, stepRoad } from '../sim/road';
+import {
+  buildNetwork,
+  locate,
+  networkGapAhead,
+  networkSpawnSlot,
+  stepNetwork,
+  type Network,
+} from '../sim/network';
+import { Road, type RoadConfig } from '../sim/road';
 
 export type Vec3 = [number, number, number];
 
@@ -460,24 +468,66 @@ function squareScene(): SceneDef {
 }
 
 // ---------------------------------------------------------------------------
-// Scene 3: a single configurable Road (the building block). Geometry comes from
-// the Road class in the sim; the renderer rebuilds it whenever the GUI config changes.
+// Scene 3: two roads connected end-to-start (the network building block demo).
+// Road A keeps its own frame; road B is rotated + translated to start exactly at
+// A's end with heading continuity.
 // ---------------------------------------------------------------------------
 
-/** The active scene-3 road, rebuilt by the renderer on scene switch or config change. */
-export const scene3State: { road: Road | null } = { road: null };
-
-function requireRoad(): Road {
-  if (!scene3State.road) throw new Error('scene 3 road not built yet');
-  return scene3State.road;
+/** Rotation (about +Y) + translation placing a road's local path into the world. */
+export interface Transform {
+  tx: number;
+  tz: number;
+  cos: number;
+  sin: number;
 }
 
-function buildRoadStatic(road: Road, palette: Palette): number[] {
-  const verts: number[] = [];
-  const G = 300;
-  pushQuad(verts, [[-G, 0, -G], [-G, 0, G], [G, 0, G], [G, 0, -G]], palette.ground);
+function applyTransform(p: PathPoint, t: Transform): PathPoint {
+  return {
+    x: p.x * t.cos + p.z * t.sin + t.tx,
+    z: -p.x * t.sin + p.z * t.cos + t.tz,
+    hx: p.hx * t.cos + p.hz * t.sin,
+    hz: -p.hx * t.sin + p.hz * t.cos,
+    rx: p.rx * t.cos + p.rz * t.sin,
+    rz: -p.rx * t.sin + p.rz * t.cos,
+  };
+}
 
-  const path = (s: number): { x: number; z: number; rx: number; rz: number } => road.point(s);
+/** The active scene-3 network, rebuilt by the renderer on scene switch or config change. */
+export const scene3State: { net: Network | null; transforms: Transform[] } = {
+  net: null,
+  transforms: [],
+};
+
+function requireNet(): Network {
+  if (!scene3State.net) throw new Error('scene 3 network not built yet');
+  return scene3State.net;
+}
+
+/** Builds the two-road network and places road B at road A's end. */
+export function buildScene3(cfgA: RoadConfig, cfgB: RoadConfig): void {
+  const roadA = new Road(cfgA);
+  const roadB = new Road(cfgB);
+  const net = buildNetwork([roadA, roadB], [[0, 1]]);
+  const tA: Transform = { tx: 0, tz: 0, cos: 1, sin: 0 };
+  // Rotate B so its start heading matches A's end heading, then translate B's start to A's end.
+  const end = roadA.point(roadA.length);
+  const b0 = roadB.point(0);
+  const phi = Math.atan2(end.hz, end.hx) - Math.atan2(b0.hz, b0.hx);
+  const cos = Math.cos(phi);
+  const sin = Math.sin(phi);
+  const tB: Transform = {
+    tx: end.x - (b0.x * cos + b0.z * sin),
+    tz: end.z - (-b0.x * sin + b0.z * cos),
+    cos,
+    sin,
+  };
+  scene3State.net = net;
+  scene3State.transforms = [tA, tB];
+}
+
+function buildRoadStatic(road: Road, palette: Palette, t: Transform): number[] {
+  const verts: number[] = [];
+  const path = (s: number): PathPoint => applyTransform(road.point(s), t);
   const f = road.config.lanesForward;
   const b = road.config.lanesBackward;
   const oMin = -4 * b;
@@ -505,21 +555,23 @@ function buildRoadStatic(road: Road, palette: Palette): number[] {
       pushPathPatch(verts, path, s, Math.min(s + 2, L), o - 0.075, o + 0.075, 0.03, paint);
     }
   }
-
   return verts;
 }
 
-function roadCarPose(road: Road, car: Car): Pose {
-  const fromLane = road.lanes[Math.round(car.laneFrom)];
-  const toLane = road.lanes[car.lane];
+function networkCarPose(net: Network, transforms: Transform[], car: Car): Pose {
+  const from = locate(net, Math.round(car.laneFrom));
+  const to = locate(net, car.lane);
+  const road = net.roads[to.road];
+  const fromLane = road.lanes[from.lane]; // from/to are the same road during a slide
+  const toLane = road.lanes[to.lane];
   const span = car.lane - car.laneFrom;
   const t = span === 0 ? 1 : (car.lateral - car.laneFrom) / span;
   const offset = fromLane.offset + (toLane.offset - fromLane.offset) * t;
   const offsetVel = span === 0 ? 0 : ((toLane.offset - fromLane.offset) * car.lateralVel) / span;
   const dir = toLane.direction;
-  const p = road.point(car.s);
-  // Nose along the true velocity: travel direction plus the lateral slide. The yaw is
-  // the negated offset rate (local +z points along +offset), flipped for backward lanes.
+  const p = applyTransform(road.point(car.s), transforms[to.road]);
+  // Nose along the true velocity: travel direction plus the lateral slide (negated:
+  // local +z points along +offset), flipped for backward lanes.
   const yaw = Math.atan2(-offsetVel * dir, Math.max(car.v, 1));
   return {
     x: p.x + p.rx * offset,
@@ -533,16 +585,24 @@ function roadCarPose(road: Road, car: Car): Pose {
 function roadScene(): SceneDef {
   return {
     get c() {
-      return requireRoad().length;
+      return requireNet().roads.reduce((sum, road) => sum + road.length, 0);
     },
     obstacles: [],
     lamps: [],
-    buildStatic: (palette) => buildRoadStatic(requireRoad(), palette),
-    carPose: (car) => roadCarPose(requireRoad(), car),
-    step: (cars, params, carLength, dt) => stepRoad(requireRoad(), cars, params, carLength, dt),
-    leaderGap: (cars, i, carLength) => roadGapAhead(requireRoad(), cars, i, carLength),
+    buildStatic: (palette) => {
+      const net = requireNet();
+      const groundVerts: number[] = [];
+      const G = 300;
+      pushQuad(groundVerts, [[-G, 0, -G], [-G, 0, G], [G, 0, G], [G, 0, -G]], palette.ground);
+      return net.roads
+        .flatMap((road, r) => buildRoadStatic(road, palette, scene3State.transforms[r]))
+        .concat(groundVerts);
+    },
+    carPose: (car) => networkCarPose(requireNet(), scene3State.transforms, car),
+    step: (cars, params, carLength, dt) => stepNetwork(requireNet(), cars, params, carLength, dt),
+    leaderGap: (cars, i, carLength) => networkGapAhead(requireNet(), cars, i, carLength),
     findSpawnSlot: (cars, _carParams, params, carLength) =>
-      roadSpawnSlot(requireRoad(), cars, params, carLength),
+      networkSpawnSlot(requireNet(), cars, params, carLength),
   };
 }
 
