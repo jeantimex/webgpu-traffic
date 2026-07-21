@@ -36,7 +36,7 @@ export interface Lane {
 const LANE_WIDTH = 4;
 
 function straightPath(length: number): (s: number) => PathPoint {
-  return (s) => ({ x: s - length / 2, z: 0, hx: 1, hz: 0, rx: 0, rz: 1 });
+  return (s) => ({ x: s - length / 2, z: 0, hx: 1, hz: 0, rx: 0, rz: -1 });
 }
 
 const MIN_ANGLE_DEG = 5; // a zero-length road is degenerate
@@ -60,8 +60,8 @@ function arcPath(radius: number, angleDeg: number): (s: number) => PathPoint {
       z: mirror * (radius * (1 - Math.cos(phi)) - zOffset),
       hx,
       hz,
-      rx: -hz,
-      rz: hx,
+      rx: hz,
+      rz: -hx,
     };
   };
 }
@@ -101,7 +101,7 @@ function scurvePath(radius: number, angleDeg: number): (s: number) => PathPoint 
       hz = Math.sin(theta - psi);
     }
     hz *= mirror;
-    return { x: x - cx, z: mirror * (z - cz), hx, hz, rx: -hz, rz: hx };
+    return { x: x - cx, z: mirror * (z - cz), hx, hz, rx: hz, rz: -hx };
   };
 }
 

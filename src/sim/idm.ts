@@ -17,7 +17,8 @@ export interface Car {
   s: number; // arc position along the ring (m), in [0, circumference)
   v: number; // current speed (m/s)
   a: number; // last computed acceleration (m/s²)
-  lane: number; // logical lane: 0 = inner, 1 = outer
+  lane: number; // logical lane: 0 = inner, 1 = outer (global lane index in networks)
+  route: number; // exit choice at connections: 0 = straight, 1 = right, 2 = left
   lateral: number; // visual lane position in lane units (0 = inner, 1 = outer), eases toward `lane`
   lateralVel: number; // lateral velocity (lane units/s) during a lane change, 0 otherwise
   laneFrom: number; // lateral position where the current lane change started

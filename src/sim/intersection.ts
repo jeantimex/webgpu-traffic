@@ -7,7 +7,19 @@
  *
  * Road order in the network: [S, N, E, W, NS connector, EW connector].
  */
-import { buildNetwork, globalLane, type NetObstacle, type Network } from './network';
+import type { Car } from './idm';
+import {
+  buildNetwork,
+  globalLane,
+  locate,
+  ROUTE_LEFT,
+  ROUTE_RIGHT,
+  ROUTE_STRAIGHT,
+  type LaneConnection,
+  type NetObstacle,
+  type Network,
+  type RoadLink,
+} from './network';
 import { Road } from './road';
 
 export interface IntersectionConfig {
@@ -22,9 +34,23 @@ export interface IntersectionState {
   entries: { ns: NetObstacle[]; ew: NetObstacle[] };
   /** Road indices. */
   idx: { s: number; n: number; e: number; w: number; nsConn: number; ewConn: number };
+  /** Opposing stream lanes per approach lane (for left-turn yield). */
+  opposing: Map<number, number[]>;
 }
 
 export const IDX = { s: 0, n: 1, e: 2, w: 3, nsConn: 4, ewConn: 5 } as const;
+
+/** Turn-arc road indices: [approach][route]. */
+export const ARC = {
+  sRight: 6,
+  sLeft: 7,
+  nRight: 8,
+  nLeft: 9,
+  eRight: 10,
+  eLeft: 11,
+  wRight: 12,
+  wLeft: 13,
+} as const;
 
 /** Distance from the zone edge to the stop line (leaves room for the crosswalk after it). */
 export const STOP_BACK = 4.5;
@@ -40,15 +66,80 @@ export function buildIntersection(cfg: IntersectionConfig): IntersectionState {
       lanesForward: lanes,
       lanesBackward: lanes,
     });
+  const mkArc = (radius: number, angle: number): Road => {
+    // Turn paths run a single lane centered on the arc, from approach lane to exit lane.
+    const road = new Road({ shape: 'arc', length: 0, radius, angle, lanesForward: 1, lanesBackward: 0 });
+    road.lanes[0].offset = 0;
+    return road;
+  };
 
   const zoneHalf = 4 * lanes; // the zone is exactly as wide as the roads it joins
-  const roads = [cfg.approach, cfg.approach, cfg.approach, cfg.approach, zoneHalf * 2, zoneHalf * 2].map(mk);
-  const net = buildNetwork(roads, [
+  const roads = [
+    ...[cfg.approach, cfg.approach, cfg.approach, cfg.approach].map(mk),
+    ...[zoneHalf * 2, zoneHalf * 2].map(mk),
+    // Turn arcs, exact for one lane each way: right turns sweep 2 m, left turns 6 m.
+    // ponytail: with more lanes the radii only approximate the outer/inner turn lanes.
+    mkArc(2, -90), // S right → W
+    mkArc(6, 90), // S left → E
+    mkArc(2, -90), // N right → E
+    mkArc(6, 90), // N left → W
+    mkArc(2, -90), // E right → S
+    mkArc(6, 90), // E left → N
+    mkArc(2, -90), // W right → N
+    mkArc(6, 90), // W left → S
+  ];
+  const links: RoadLink[] = [
+    // straight flow
     [IDX.s, IDX.nsConn],
     [IDX.nsConn, IDX.n],
     [IDX.w, IDX.ewConn],
     [IDX.ewConn, IDX.e],
-  ]);
+    // approach → turn arcs (S/W enter the zone from their end side, N/E from their start side)
+    [IDX.s, ARC.sRight],
+    [IDX.s, ARC.sLeft],
+    [IDX.n, ARC.nRight, 0, 0],
+    [IDX.n, ARC.nLeft, 0, 0],
+    [IDX.e, ARC.eRight, 0, 0],
+    [IDX.e, ARC.eLeft, 0, 0],
+    [IDX.w, ARC.wRight],
+    [IDX.w, ARC.wLeft],
+    // turn arcs → exit roads (right-hand traffic: right turns to the near road, left
+    // turns across to the far road)
+    [ARC.sRight, IDX.e],
+    [ARC.sLeft, IDX.w, 1, 1],
+    [ARC.nRight, IDX.w, 1, 1],
+    [ARC.nLeft, IDX.e],
+    [ARC.eRight, IDX.n],
+    [ARC.eLeft, IDX.s, 1, 1],
+    [ARC.wRight, IDX.s, 1, 1],
+    [ARC.wLeft, IDX.n],
+  ];
+  const net = buildNetwork(roads, links);
+
+  // Route connections per approach lane: right turns from the lane farthest from the
+  // yellow line, left turns from the lane closest to it; other lanes straight-only.
+  const approaches: { road: number; rightArc: number; leftArc: number }[] = [
+    { road: IDX.s, rightArc: ARC.sRight, leftArc: ARC.sLeft },
+    { road: IDX.n, rightArc: ARC.nRight, leftArc: ARC.nLeft },
+    { road: IDX.e, rightArc: ARC.eRight, leftArc: ARC.eLeft },
+    { road: IDX.w, rightArc: ARC.wRight, leftArc: ARC.wLeft },
+  ];
+  for (const { road: r, rightArc, leftArc } of approaches) {
+    net.roads[r].lanes.forEach((lane, li) => {
+      const conns = net.exit[r][li];
+      if (conns.length === 0) return; // lanes leaving the zone, not entering it
+      const straight = conns[0];
+      const right: LaneConnection = { toRoad: rightArc, toLane: 0, entranceS: 0 };
+      const left: LaneConnection = { toRoad: leftArc, toLane: 0, entranceS: 0 };
+      const forwardOuter = lane.direction > 0 && li === lanes - 1;
+      const forwardInner = lane.direction > 0 && li === 0;
+      const backwardOuter = lane.direction < 0 && li === net.roads[r].lanes.length - 1;
+      const backwardInner = lane.direction < 0 && li === lanes;
+      conns[ROUTE_RIGHT] = forwardOuter || backwardOuter ? right : straight;
+      conns[ROUTE_LEFT] = forwardInner || backwardInner ? left : straight;
+      conns[ROUTE_STRAIGHT] = straight;
+    });
+  }
 
   // Signalized entries: lanes whose travel exits into the zone, stopping at their stop
   // line (set back from the zone edge so the crosswalk fits after it).
@@ -67,7 +158,19 @@ export function buildIntersection(cfg: IntersectionConfig): IntersectionState {
     if (lane.direction < 0) ew.push({ lane: globalLane(net, IDX.e, li), s: STOP_BACK });
   });
 
-  return { net, zoneHalf, entries: { ns, ew }, idx: IDX };
+  // Opposing stream lanes per approach lane (used by left-turn yield).
+  const group = (road: number, dir: number): number[] =>
+    net.roads[road].lanes.flatMap((lane, li) => (lane.direction === dir ? [globalLane(net, road, li)] : []));
+  const opposing = new Map<number, number[]>();
+  for (const [a, b, conn] of [
+    [IDX.s, IDX.n, IDX.nsConn],
+    [IDX.w, IDX.e, IDX.ewConn],
+  ] as const) {
+    group(a, 1).forEach((g) => opposing.set(g, [...group(b, -1), ...group(conn, -1)]));
+    group(b, -1).forEach((g) => opposing.set(g, [...group(a, 1), ...group(conn, 1)]));
+  }
+
+  return { net, zoneHalf, entries: { ns, ew }, idx: IDX, opposing };
 }
 
 export type IntersectionPhase = 'nsGreen' | 'nsYellow' | 'ewGreen' | 'ewYellow' | 'allRed';
@@ -125,4 +228,35 @@ export function intersectionLampColor(
     default:
       return 'red';
   }
+}
+
+const YIELD_DIST = 45; // m: opposing traffic closer than this to the zone blocks a left turn
+const YIELD_MIN_SPEED = 1; // m/s: stopped opponents don't block
+
+/**
+ * Stop-line obstacles for left-turning cars that must give way: a left-routed car on
+ * an approach is held at its stop line while an opposing-stream car is approaching
+ * the zone (and actually moving).
+ */
+export function leftTurnYieldObstacles(state: IntersectionState, cars: Car[]): NetObstacle[] {
+  const out: NetObstacle[] = [];
+  cars.forEach((car, i) => {
+    if (car.route !== ROUTE_LEFT) return;
+    const entry = [...state.entries.ns, ...state.entries.ew].find((e) => e.lane === car.lane);
+    if (!entry) return; // not on an approach lane: no yield inside the zone
+    const { road: ri, lane: li } = locate(state.net, car.lane);
+    const dir = state.net.roads[ri].lanes[li].direction;
+    if ((entry.s - car.s) * dir < 0) return; // already past the stop line
+    const blocked = (state.opposing.get(car.lane) ?? []).some((lane) =>
+      cars.some((other, j) => {
+        if (j === i || other.lane !== lane || other.v < YIELD_MIN_SPEED) return false;
+        const ol = locate(state.net, lane);
+        const oRoad = state.net.roads[ol.road];
+        const dist = oRoad.lanes[ol.lane].direction > 0 ? oRoad.length - other.s : other.s;
+        return dist < YIELD_DIST;
+      }),
+    );
+    if (blocked) out.push(entry);
+  });
+  return out;
 }

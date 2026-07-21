@@ -33,13 +33,18 @@ export interface LaneConnection {
   entranceS: number; // arc position where traffic enters the target road
 }
 
+/** Route indices into a lane's connection list. */
+export const ROUTE_STRAIGHT = 0;
+export const ROUTE_RIGHT = 1;
+export const ROUTE_LEFT = 2;
+
 export interface Network {
   roads: Road[];
   /** Prefix sums of lane counts: global lane index = laneOffsets[road] + localLane. */
   laneOffsets: number[];
   numLanes: number;
-  /** exit[road][lane] = the connection at that lane's travel end, or null for a stop. */
-  exit: (LaneConnection | null)[][];
+  /** exit[road][lane] = route-indexed connections at that lane's travel end (empty = stop sign). */
+  exit: LaneConnection[][][];
 }
 
 export function globalLane(net: Network, road: number, lane: number): number {
@@ -54,35 +59,59 @@ export function locate(net: Network, global: number): { road: number; lane: numb
   return { road: 0, lane: 0 };
 }
 
+/** A link between two road ends. end: 1 = road end (s = length), 0 = road start (s = 0). */
+export type RoadLink = [a: number, b: number, aEnd?: number, bEnd?: number];
+
 /**
- * Builds a network from roads and end→start links [fromRoad, toRoad].
- * Lane mapping is automatic per direction of travel.
+ * Builds a network from roads and links. Lane mapping is automatic: lanes exiting
+ * at one side feed the lanes entering at the other side, clamped by index.
  */
-export function buildNetwork(roads: Road[], links: [number, number][]): Network {
+export function buildNetwork(roads: Road[], links: RoadLink[]): Network {
   const laneOffsets: number[] = [];
   let total = 0;
   for (const road of roads) {
     laneOffsets.push(total);
     total += road.lanes.length;
   }
-  const exit: (LaneConnection | null)[][] = roads.map((r) => r.lanes.map(() => null));
+  const exit: LaneConnection[][][] = roads.map((r) => r.lanes.map(() => []));
 
-  for (const [a, b] of links) {
-    const roadA = roads[a];
-    const fwdA = roadA.lanes.flatMap((lane, i) => (lane.direction > 0 ? [i] : []));
-    const fwdB = roads[b].lanes.flatMap((lane, i) => (lane.direction > 0 ? [i] : []));
-    const backA = roadA.lanes.flatMap((lane, i) => (lane.direction < 0 ? [i] : []));
-    const backB = roads[b].lanes.flatMap((lane, i) => (lane.direction < 0 ? [i] : []));
-    // A's forward lanes exit at A's end and enter B's forward lanes at B's start.
-    fwdA.forEach((lane, i) => {
-      exit[a][lane] = { toRoad: b, toLane: fwdB[Math.min(i, fwdB.length - 1)], entranceS: 0 };
-    });
-    // B's backward lanes exit at B's start and enter A's backward lanes at A's end.
-    backB.forEach((lane, j) => {
-      exit[b][lane] = { toRoad: a, toLane: backA[Math.min(j, backA.length - 1)], entranceS: roadA.length };
-    });
+  // Lanes exiting (leaving) or entering at one side of a road, in offset order.
+  const lanesAt = (roadIdx: number, end: number, exiting: boolean): number[] => {
+    const dir = exiting ? (end === 1 ? 1 : -1) : end === 1 ? -1 : 1;
+    return roads[roadIdx].lanes.flatMap((lane, i) => (lane.direction === dir ? [i] : []));
+  };
+
+  for (const [a, b, aEnd = 1, bEnd = 0] of links) {
+    const exitA = lanesAt(a, aEnd, true);
+    const enterB = lanesAt(b, bEnd, false);
+    const exitB = lanesAt(b, bEnd, true);
+    const enterA = lanesAt(a, aEnd, false);
+    if (enterB.length > 0) {
+      exitA.forEach((lane, i) => {
+        exit[a][lane].push({
+          toRoad: b,
+          toLane: enterB[Math.min(i, enterB.length - 1)],
+          entranceS: bEnd === 0 ? 0 : roads[b].length,
+        });
+      });
+    }
+    if (enterA.length > 0) {
+      exitB.forEach((lane, j) => {
+        exit[b][lane].push({
+          toRoad: a,
+          toLane: enterA[Math.min(j, enterA.length - 1)],
+          entranceS: aEnd === 0 ? 0 : roads[a].length,
+        });
+      });
+    }
   }
   return { roads, laneOffsets, numLanes: total, exit };
+}
+
+/** The connection a car follows at its lane's end, by route (clamped to what exists). */
+function connectionFor(net: Network, road: number, lane: number, route: number): LaneConnection | null {
+  const conns = net.exit[road][lane];
+  return conns.length === 0 ? null : conns[Math.min(route, conns.length - 1)];
 }
 
 /** Nearest car in `laneIndex` (local, same road) ahead of (or behind) car `me`, in travel direction. */
@@ -129,7 +158,7 @@ function downstream(
   let r = road;
   let l = lane;
   for (let hop = 0; hop < 8; hop++) {
-    const conn = net.exit[r][l];
+    const conn = connectionFor(net, r, l, cars[me].route);
     if (!conn) return { gap: gap - carLength / 2, vLead: 0 }; // stop sign at this end
     const tRoad = net.roads[conn.toRoad];
     const tDir = tRoad.lanes[conn.toLane].direction;
@@ -239,7 +268,7 @@ export function stepNetwork(
     const exitS = dir > 0 ? road.length : 0;
     const overshoot = (car.s - exitS) * dir;
     if (overshoot > 0) {
-      const conn = net.exit[ri][li];
+      const conn = connectionFor(net, ri, li, car.route);
       if (conn) {
         const tDir = net.roads[conn.toRoad].lanes[conn.toLane].direction;
         car.s = conn.entranceS + overshoot * tDir;
@@ -275,11 +304,11 @@ export function networkSpawnSlot(
   params: IdmParams,
   carLength: number,
 ): { s: number; lane: number } | null {
-  // Lanes already fed by a connection are not spawn entrances.
+  // Lanes already fed by any route connection are not spawn entrances.
   const fed = new Set<number>();
   net.roads.forEach((_, r) => {
-    net.exit[r].forEach((conn) => {
-      if (conn) fed.add(globalLane(net, conn.toRoad, conn.toLane));
+    net.exit[r].forEach((conns) => {
+      conns.forEach((conn) => fed.add(globalLane(net, conn.toRoad, conn.toLane)));
     });
   });
 

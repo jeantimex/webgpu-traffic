@@ -90,6 +90,12 @@ function buildCarMesh(carLength: number): number[] {
   return verts;
 }
 
+/** Random exit choice for intersection traffic: mostly straight, sometimes a turn. */
+function randomRoute(): number {
+  const r = Math.random();
+  return r < 0.6 ? 0 : r < 0.8 ? 1 : 2;
+}
+
 /** The signal lamp box, white so the per-draw red/green tint shows through. */
 function buildLampMesh(): number[] {
   const verts: number[] = [];
@@ -298,6 +304,7 @@ export class Renderer {
         v: params.v0,
         a: 0,
         lane,
+        route: this.scene === 4 ? randomRoute() : 0,
         lateral: lane,
         lateralVel: 0,
         laneFrom: lane,
@@ -320,6 +327,7 @@ export class Renderer {
       v: params.v0,
       a: 0,
       lane: slot.lane,
+      route: this.scene === 4 ? randomRoute() : 0,
       lateral: slot.lane,
       lateralVel: 0,
       laneFrom: slot.lane,
@@ -342,6 +350,37 @@ export class Renderer {
       return this.spawnCar(params);
     });
     this.carParams = [...paramsList];
+  }
+
+  /** Cars stopped at an unconnected end "left the map": respawn them at a safe entrance. */
+  private recycleCars(): void {
+    const net = this.scene === 3 ? scene3State.net : this.scene === 4 ? (scene4State.state?.net ?? null) : null;
+    if (!net) return;
+    this.cars.forEach((car, i) => {
+      const { road: ri, lane: li } = locate(net, car.lane);
+      if (net.exit[ri][li].length > 0) return; // connected end: keeps flowing
+      const road = net.roads[ri];
+      const dir = road.lanes[li].direction;
+      const distToEnd = dir > 0 ? road.length - car.s : car.s;
+      if (distToEnd > 3 || car.v > 0.5) return;
+      const slot = this.def.findSpawnSlot(
+        this.cars,
+        this.carParams,
+        this.carParams[i],
+        this.gui.settings.carLength,
+      );
+      if (!slot) return;
+      car.s = slot.s;
+      car.lane = slot.lane;
+      car.lateral = slot.lane;
+      car.laneFrom = slot.lane;
+      car.laneProgress = 1;
+      car.lateralVel = 0;
+      car.v = this.carParams[i].v0;
+      car.a = 0;
+      car.cooldown = 0;
+      car.route = this.scene === 4 ? randomRoute() : 0;
+    });
   }
 
   private readonly render = (now: number): void => {
@@ -397,6 +436,7 @@ export class Renderer {
     }
     phase = this.def.phaseAt(this.lightClock, this.gui.settings.light);
     this.gui.telemetry.light = phase;
+    this.recycleCars();
 
     // Vehicle length is baked into the car mesh; rebuild it in place when the slider moves.
     if (this.gui.settings.carLength !== this.builtCarLength) {
@@ -417,10 +457,11 @@ export class Renderer {
     }
     this.cars.forEach((car, i) => {
       const gap = this.def.leaderGap(this.cars, i, this.gui.settings.carLength);
+      const route = this.scene === 4 ? ` ${['S', 'R', 'L'][car.route]}` : '';
       this.gui.telemetry.speeds[String(i)] =
         gap === null
-          ? `${car.v.toFixed(1)} m/s, free road`
-          : `${car.v.toFixed(1)} m/s, gap ${gap.toFixed(1)} m`;
+          ? `${car.v.toFixed(1)} m/s${route}, free road`
+          : `${car.v.toFixed(1)} m/s${route}, gap ${gap.toFixed(1)} m`;
     });
 
     const viewProj = multiply(

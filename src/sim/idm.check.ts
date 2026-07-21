@@ -4,13 +4,20 @@
  */
 import { idmAcceleration, stepRing, type Car, type IdmParams } from './idm';
 import {
+  buildScene4,
+  SCENES,
+  scene4State,
+} from '../renderer/scenes';
+import {
   buildIntersection,
   IDX,
   intersectionObstacles,
   intersectionPhaseAt,
+  leftTurnYieldObstacles,
+  STOP_BACK,
   type IntersectionState,
 } from './intersection';
-import { buildNetwork, locate, stepNetwork, type Network } from './network';
+import { buildNetwork, locate, stepNetwork, type NetObstacle, type Network } from './network';
 import { Road } from './road';
 
 function assert(cond: boolean, msg: string): void {
@@ -30,8 +37,8 @@ assert(idmAcceleration(25, 5, 25, fast) < 0, 'brakes for a close leader');
 const C = 2 * Math.PI * 40;
 const CAR_LENGTH = 4.5;
 const cars: Car[] = [
-  { s: 0, v: 30, a: 0, lane: 0, lateral: 0, lateralVel: 0, laneFrom: 0, laneProgress: 1, cooldown: 0 },
-  { s: C / 2, v: 12, a: 0, lane: 0, lateral: 0, lateralVel: 0, laneFrom: 0, laneProgress: 1, cooldown: 0 },
+  { s: 0, v: 30, a: 0, lane: 0, route: 0, lateral: 0, lateralVel: 0, laneFrom: 0, laneProgress: 1, cooldown: 0 },
+  { s: C / 2, v: 12, a: 0, lane: 0, route: 0, lateral: 0, lateralVel: 0, laneFrom: 0, laneProgress: 1, cooldown: 0 },
 ];
 let minGap = Infinity;
 let changedLanes = false;
@@ -54,7 +61,7 @@ assert(cars[0].v > 25, `fast car was not stuck behind the slow one (v=${cars[0].
 assert(maxLateralJump < 0.1, `lateral velocity is continuous (max jump ${maxLateralJump.toFixed(3)} units/s)`);
 
 // Red light: a car must stop just before the stop line, then accelerate away once it turns green.
-const lone: Car[] = [{ s: 0, v: 20, a: 0, lane: 0, lateral: 0, lateralVel: 0, laneFrom: 0, laneProgress: 1, cooldown: 0 }];
+const lone: Car[] = [{ s: 0, v: 20, a: 0, lane: 0, route: 0, lateral: 0, lateralVel: 0, laneFrom: 0, laneProgress: 1, cooldown: 0 }];
 const redLight = [{ s: C / 4 }];
 for (let step = 0; step < 60 * 60; step++) stepRing(lone, [fast], C, CAR_LENGTH, 1 / 60, redLight);
 const distToLine = (((C / 4 - lone[0].s) % C) + C) % C;
@@ -67,8 +74,8 @@ assert(lone[0].v > 10, `accelerates on green (v=${lone[0].v.toFixed(1)})`);
 
 // Different lanes: no car-following interaction — the fast car keeps its desired speed.
 const twoLanes: Car[] = [
-  { s: C / 2 + 30, v: 12, a: 0, lane: 0, lateral: 0, lateralVel: 0, laneFrom: 0, laneProgress: 1, cooldown: 0 }, // slow, ahead in the inner lane
-  { s: C / 2, v: 30, a: 0, lane: 1, lateral: 1, lateralVel: 0, laneFrom: 1, laneProgress: 1, cooldown: 0 }, // fast, catching up in the outer lane
+  { s: C / 2 + 30, v: 12, a: 0, lane: 0, route: 0, lateral: 0, lateralVel: 0, laneFrom: 0, laneProgress: 1, cooldown: 0 }, // slow, ahead in the inner lane
+  { s: C / 2, v: 30, a: 0, lane: 1, route: 0, lateral: 1, lateralVel: 0, laneFrom: 1, laneProgress: 1, cooldown: 0 }, // fast, catching up in the outer lane
 ];
 for (let step = 0; step < 60 * 60; step++) stepRing(twoLanes, [slow, fast], C, CAR_LENGTH, 1 / 60);
 assert(
@@ -82,11 +89,12 @@ console.log(`IDM checks passed (min gap ${minGap.toFixed(2)} m, settled at ${car
 // Road + Network (building blocks)
 // ---------------------------------------------------------------------------
 
-const newCar = (s: number, v: number, lane: number): Car => ({
+const newCar = (s: number, v: number, lane: number, route = 0): Car => ({
   s,
   v,
   a: 0,
   lane,
+  route,
   lateral: lane,
   lateralVel: 0,
   laneFrom: lane,
@@ -287,3 +295,98 @@ const intersectionOf = (): IntersectionState => buildIntersection({ approach: 80
 }
 
 console.log('Intersection checks passed');
+
+// ---------------------------------------------------------------------------
+// Turns at the intersection
+// ---------------------------------------------------------------------------
+
+const signalWithYield = (state: IntersectionState, cars: Car[]): NetObstacle[] => [
+  ...intersectionObstacles(state, 'nsGreen'),
+  ...leftTurnYieldObstacles(state, cars),
+];
+
+// Right turn on green: an S car with route=right ends up on the E road.
+{
+  const state = intersectionOf();
+  const car = [newCar(0, 12, 0, 1)];
+  for (let step = 0; step < 20 * 60; step++) {
+    stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, signalWithYield(state, car));
+  }
+  assert(locate(state.net, car[0].lane).road === IDX.e, `S car turned right onto E (road ${locate(state.net, car[0].lane).road})`);
+}
+
+// Right turn does NOT yield to opposing traffic.
+{
+  const state = intersectionOf();
+  const cars = [newCar(0, 12, 0, 1), newCar(30, 12, 3, 0)]; // S-right + N backward approaching
+  let minV = Infinity;
+  for (let step = 0; step < 8 * 60; step++) {
+    stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
+    if (locate(state.net, cars[0].lane).road === IDX.s) minV = Math.min(minV, cars[0].v);
+  }
+  assert(minV > 10, `right turn never yielded (min approach speed ${minV.toFixed(2)})`);
+}
+
+// Left turn yields: the S car waits at the line until the opposing car has passed, then turns onto E.
+{
+  const state = intersectionOf();
+  const cars = [newCar(60, 12, 0, 2), newCar(30, 12, 3, 0)]; // S-left + N backward opposing
+  const stopLine = 80 - STOP_BACK;
+  for (let step = 0; step < 2 * 60; step++) {
+    stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
+  }
+  assert(cars[0].s <= stopLine + 0.01, `left turn held at the line while opposing passes (s=${cars[0].s.toFixed(1)})`);
+  for (let step = 0; step < 28 * 60; step++) {
+    stepNetwork(state.net, cars, [slow, slow], CAR_LENGTH, 1 / 60, signalWithYield(state, cars));
+  }
+  assert(locate(state.net, cars[0].lane).road === IDX.w, `S car turned left onto W after yielding (road ${locate(state.net, cars[0].lane).road})`);
+}
+
+console.log('Turn checks passed');
+
+// ---------------------------------------------------------------------------
+// Turn-arc geometry: every arc's end pose must land on its exit lane (the bug the
+// topology checks could not see).
+// ---------------------------------------------------------------------------
+{
+  buildScene4({ approach: 80, lanesEachWay: 1 });
+  const def = SCENES[3];
+  const net = scene4State.state!.net;
+  const expected: [number, number, number, number][] = [
+    [4, -2, 1, 0], // S right → E
+    [-4, 2, -1, 0], // S left → W
+    [-4, 2, -1, 0], // N right → W
+    [4, -2, 1, 0], // N left → E
+    [2, 4, 0, 1], // E right → N
+    [-2, -4, 0, -1], // E left → S
+    [-2, -4, 0, -1], // W right → S
+    [2, 4, 0, 1], // W left → N
+  ];
+  for (let k = 0; k < 8; k++) {
+    const roadIdx = 6 + k;
+    const g = net.laneOffsets[roadIdx];
+    const car: Car = {
+      s: net.roads[roadIdx].length,
+      v: 10,
+      a: 0,
+      lane: g,
+      route: 0,
+      lateral: g,
+      lateralVel: 0,
+      laneFrom: g,
+      laneProgress: 1,
+      cooldown: 0,
+    };
+    const pose = def.carPose(car);
+    const [ex, ez, ehx, ehz] = expected[k];
+    assert(
+      Math.abs(pose.x - ex) < 1 && Math.abs(pose.z - ez) < 1,
+      `arc ${roadIdx} ends at its exit lane (got ${pose.x.toFixed(1)}, ${pose.z.toFixed(1)})`,
+    );
+    assert(
+      Math.abs(Math.cos(pose.angle) - ehx) < 0.2 && Math.abs(-Math.sin(pose.angle) - ehz) < 0.2,
+      `arc ${roadIdx} exits with the right heading`,
+    );
+  }
+  console.log('Turn geometry checks passed');
+}
