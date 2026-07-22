@@ -124,6 +124,21 @@ const newCar = (s: number, v: number, lane: number, route = 0): Car => ({
 
 const netOf = (...roads: Road[]): Network => buildNetwork(roads, roads.length > 1 ? [[0, 1]] : []);
 
+// Lane-backed loop topology preserves the old ring step behavior for the same inputs.
+{
+  const legacy = [newCar(0, 30, 0), newCar(C / 2, 12, 0)];
+  const laneBacked = [newCar(0, 30, 0), newCar(C / 2, 12, 0)];
+  for (let step = 0; step < 12 * 60; step++) {
+    stepRing(legacy, [fast, slow], C, CAR_LENGTH, 1 / 60);
+    SCENES[0].step(laneBacked, [fast, slow], CAR_LENGTH, 1 / 60, []);
+  }
+  legacy.forEach((car, i) => {
+    assert(Math.abs(car.s - laneBacked[i].s) < 1e-9, `lane loop preserves ring s for car ${i}`);
+    assert(Math.abs(car.v - laneBacked[i].v) < 1e-9, `lane loop preserves ring speed for car ${i}`);
+    assert(car.lane === laneBacked[i].lane, `lane loop preserves ring lane for car ${i}`);
+  });
+}
+
 function assertLanePointMatchesRoad(net: Network, road: Road, lane: number, s: number, msg: string): void {
   const base = road.point(s);
   const expectedX = base.x + base.rx * road.lanes[lane].offset;
