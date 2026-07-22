@@ -26,6 +26,7 @@ export interface RoadConfig {
   angle: number; // arc & scurve (degrees; per arc for scurve; negative = turn right)
   lanesForward: number; // 1..3
   lanesBackward: number; // 0..3 (0 = one-way)
+  customPath?: (s: number) => PathPoint;
 }
 
 export interface Lane {
@@ -140,19 +141,24 @@ export class Road {
     readonly config: RoadConfig,
     handed = 1, // 1 = right-hand traffic, -1 = left-hand traffic (mirrors lane sides)
   ) {
-    switch (config.shape) {
-      case 'straight':
-        this.length = config.length;
-        this.path = straightPath(this.length);
-        break;
-      case 'arc':
-        this.length = (config.radius * Math.max(MIN_ANGLE_DEG, Math.abs(config.angle)) * Math.PI) / 180;
-        this.path = arcPath(config.radius, config.angle);
-        break;
-      case 'scurve':
-        this.length = (2 * config.radius * Math.max(MIN_ANGLE_DEG, Math.abs(config.angle)) * Math.PI) / 180;
-        this.path = scurvePath(config.radius, config.angle);
-        break;
+    if (config.customPath) {
+      this.length = config.length;
+      this.path = config.customPath;
+    } else {
+      switch (config.shape) {
+        case 'straight':
+          this.length = config.length;
+          this.path = straightPath(this.length);
+          break;
+        case 'arc':
+          this.length = (config.radius * Math.max(MIN_ANGLE_DEG, Math.abs(config.angle)) * Math.PI) / 180;
+          this.path = arcPath(config.radius, config.angle);
+          break;
+        case 'scurve':
+          this.length = (2 * config.radius * Math.max(MIN_ANGLE_DEG, Math.abs(config.angle)) * Math.PI) / 180;
+          this.path = scurvePath(config.radius, config.angle);
+          break;
+      }
     }
     for (let i = 0; i < config.lanesForward; i++) {
       this.lanes.push(makeLane(1, (LANE_WIDTH / 2 + i * LANE_WIDTH) * handed));

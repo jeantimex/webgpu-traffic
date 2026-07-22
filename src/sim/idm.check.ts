@@ -7,6 +7,8 @@ import {
   buildScene3,
   buildScene4,
   SCENES,
+  scene1State,
+  scene2State,
   scene3State,
   scene4State,
 } from '../renderer/scenes';
@@ -189,6 +191,30 @@ for (const shape of ['straight', 'arc', 'scurve'] as const) {
 }
 
 // Network scene poses consume lane geometry for settled cars.
+{
+  const s = 33;
+  const theta = s / 40;
+  const car = newCar(s, 12, 1);
+  const pose = SCENES[0].carPose(car);
+  const r = 42;
+  assert(scene1State.net.numLanes === 2, 'scene 1 has a lane-backed loop network');
+  assert(Math.abs(pose.x - r * Math.cos(theta)) < 1e-9, 'scene 1 pose x preserves ring geometry');
+  assert(Math.abs(pose.z - r * Math.sin(theta)) < 1e-9, 'scene 1 pose z preserves ring geometry');
+  assert(Math.abs(Math.cos(pose.angle) + Math.sin(theta)) < 1e-9, 'scene 1 pose heading x preserves ring geometry');
+  assert(Math.abs(-Math.sin(pose.angle) - Math.cos(theta)) < 1e-9, 'scene 1 pose heading z preserves ring geometry');
+}
+
+{
+  const s = 30;
+  const p = scene2State.net.lanes[0].point(s);
+  const car = newCar(s, 12, 0);
+  const pose = SCENES[1].carPose(car);
+  assert(scene2State.net.numLanes === 2, 'scene 2 has a lane-backed loop network');
+  assert(Math.abs(pose.x - p.x) < 1e-9 && Math.abs(pose.z - p.z) < 1e-9, 'scene 2 pose uses square lane geometry');
+  assert(Math.abs(Math.cos(pose.angle) - p.hx) < 1e-9, 'scene 2 pose heading x uses square lane geometry');
+  assert(Math.abs(-Math.sin(pose.angle) - p.hz) < 1e-9, 'scene 2 pose heading z uses square lane geometry');
+}
+
 {
   buildScene3(
     { shape: 'straight', length: 120, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 },

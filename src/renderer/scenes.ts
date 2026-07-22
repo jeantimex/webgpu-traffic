@@ -160,6 +160,24 @@ const RING_LAMP = {
   z: (TRACK_RADIUS - ROAD_HALF_WIDTH - 1.2) * Math.sin(STOP_S / TRACK_RADIUS),
 };
 
+function ringPathPoint(s: number): PathPoint {
+  const theta = s / TRACK_RADIUS;
+  const hx = -Math.sin(theta);
+  const hz = Math.cos(theta);
+  return {
+    x: TRACK_RADIUS * Math.cos(theta),
+    z: TRACK_RADIUS * Math.sin(theta),
+    hx,
+    hz,
+    rx: -hz,
+    rz: hx,
+  };
+}
+
+export const scene1State: { net: Network } = {
+  net: buildLoopNetwork(RING_C, ringPathPoint, [2, -2]),
+};
+
 /** The bridge is a raised-cosine bump on the far side of the ring (clear of the cars' start and the crossing). */
 const BRIDGE_LENGTH = 60; // m along the arc
 const BRIDGE_HEIGHT = 4; // m
@@ -346,16 +364,20 @@ function ringScene(): SceneDef {
     ...ringTopology(RING_C),
     ...ringSignal([{ s: STOP_S }]),
     carPose(car) {
-      const theta = car.s / TRACK_RADIUS;
-      // Lane centers are 2 m either side of the track radius; lateral eases between them.
-      const r = TRACK_RADIUS - 2 + 4 * car.lateral;
+      const fromGlobal = Math.round(car.laneFrom);
+      const from = lanePathPoint(scene1State.net, fromGlobal, car.s);
+      const to = lanePathPoint(scene1State.net, car.lane, car.s);
+      const span = car.lane - car.laneFrom;
+      const t = span === 0 ? 1 : (car.lateral - car.laneFrom) / span;
+      const x = from.x + (to.x - from.x) * t;
+      const z = from.z + (to.z - from.z) * t;
       // While sliding sideways, yaw the body along the actual velocity direction.
       const yaw = Math.atan2(4 * car.lateralVel, Math.max(car.v, 1));
       return {
-        x: r * Math.cos(theta),
+        x,
         y: 0.02 + roadHeight(car.s),
-        z: r * Math.sin(theta),
-        angle: -theta - Math.PI / 2 + yaw,
+        z,
+        angle: Math.atan2(-to.hz, to.hx) + yaw,
         pitch: Math.atan(roadGrade(car.s)),
       };
     },
@@ -460,6 +482,25 @@ const SQ_LAMPS = SQ_STOPS.map((s) => {
   };
 });
 
+export const scene2State: { net: Network } = {
+  net: buildLoopNetwork(SQ_C, squarePathPoint, [2, -2]),
+};
+
+function buildLoopNetwork(length: number, path: (s: number) => PathPoint, offsets: [number, number]): Network {
+  const road = new Road({
+    shape: 'straight',
+    length,
+    radius: 50,
+    angle: 90,
+    lanesForward: 2,
+    lanesBackward: 0,
+    customPath: path,
+  });
+  road.lanes[0].offset = offsets[0];
+  road.lanes[1].offset = offsets[1];
+  return buildNetwork([road], [[0, 0]]);
+}
+
 function squareStatic(palette: Palette): number[] {
   const verts: number[] = [];
   const G = 300;
@@ -500,15 +541,20 @@ function squareScene(): SceneDef {
     buildStatic: squareStatic,
     ...ringTopology(SQ_C),
     ...ringSignal(SQ_STOPS.map((s) => ({ s }))),
-    carPose(car) {      const p = squarePathPoint(car.s);
-      // Lane centers are 2 m either side of the centerline (o+ = inner lane, toward the center).
-      const o = 2 * (1 - 2 * car.lateral);
+    carPose(car) {
+      const fromGlobal = Math.round(car.laneFrom);
+      const from = lanePathPoint(scene2State.net, fromGlobal, car.s);
+      const to = lanePathPoint(scene2State.net, car.lane, car.s);
+      const span = car.lane - car.laneFrom;
+      const t = span === 0 ? 1 : (car.lateral - car.laneFrom) / span;
+      const x = from.x + (to.x - from.x) * t;
+      const z = from.z + (to.z - from.z) * t;
       const yaw = Math.atan2(4 * car.lateralVel, Math.max(car.v, 1));
       return {
-        x: p.x + p.rx * o,
+        x,
         y: 0.02,
-        z: p.z + p.rz * o,
-        angle: Math.atan2(-p.hz, p.hx) + yaw,
+        z,
+        angle: Math.atan2(-to.hz, to.hx) + yaw,
         pitch: 0,
       };
     },
