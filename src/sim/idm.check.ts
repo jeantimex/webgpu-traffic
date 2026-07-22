@@ -2,7 +2,8 @@
  * Runnable self-check for the IDM sim. Not part of the app bundle.
  * Run: node_modules/.bin/esbuild src/sim/idm.check.ts --bundle --format=esm --outfile=.idm.check.mjs && node .idm.check.mjs && rm .idm.check.mjs
  */
-import { idmAcceleration, stepRing, type Car, type IdmParams } from './idm';
+import { idmAcceleration, type Car, type IdmParams } from './idm';
+import { stepLaneLoop } from './loop';
 import {
   buildScene3,
   buildScene4,
@@ -65,7 +66,7 @@ let changedLanes = false;
 let maxLateralJump = 0;
 let prevLateralVel = 0;
 for (let step = 0; step < 120 * 60; step++) {
-  stepRing(cars, [fast, slow], C, CAR_LENGTH, 1 / 60);
+  stepLaneLoop(scene1State.net, cars, [fast, slow], C, CAR_LENGTH, 1 / 60);
   if (cars[0].lane !== 0) changedLanes = true;
   maxLateralJump = Math.max(maxLateralJump, Math.abs(cars[0].lateralVel - prevLateralVel));
   prevLateralVel = cars[0].lateralVel;
@@ -83,13 +84,13 @@ assert(maxLateralJump < 0.1, `lateral velocity is continuous (max jump ${maxLate
 // Red light: a car must stop just before the stop line, then accelerate away once it turns green.
 const lone: Car[] = [{ s: 0, v: 20, a: 0, lane: 0, route: 0, lateral: 0, lateralVel: 0, laneFrom: 0, laneProgress: 1, cooldown: 0 }];
 const redLight = [{ s: C / 4 }];
-for (let step = 0; step < 60 * 60; step++) stepRing(lone, [fast], C, CAR_LENGTH, 1 / 60, redLight);
+for (let step = 0; step < 60 * 60; step++) stepLaneLoop(scene1State.net, lone, [fast], C, CAR_LENGTH, 1 / 60, redLight);
 const distToLine = (((C / 4 - lone[0].s) % C) + C) % C;
 assert(lone[0].v < 0.01, `stopped at the red light (v=${lone[0].v.toFixed(3)})`);
 assert(
   distToLine > CAR_LENGTH / 2 && distToLine < 8,
   `stopped just before the line (${distToLine.toFixed(2)} m from center)`);
-for (let step = 0; step < 10 * 60; step++) stepRing(lone, [fast], C, CAR_LENGTH, 1 / 60);
+for (let step = 0; step < 10 * 60; step++) stepLaneLoop(scene1State.net, lone, [fast], C, CAR_LENGTH, 1 / 60);
 assert(lone[0].v > 10, `accelerates on green (v=${lone[0].v.toFixed(1)})`);
 
 // Different lanes: no car-following interaction — the fast car keeps its desired speed.
@@ -97,7 +98,7 @@ const twoLanes: Car[] = [
   { s: C / 2 + 30, v: 12, a: 0, lane: 0, route: 0, lateral: 0, lateralVel: 0, laneFrom: 0, laneProgress: 1, cooldown: 0 }, // slow, ahead in the inner lane
   { s: C / 2, v: 30, a: 0, lane: 1, route: 0, lateral: 1, lateralVel: 0, laneFrom: 1, laneProgress: 1, cooldown: 0 }, // fast, catching up in the outer lane
 ];
-for (let step = 0; step < 60 * 60; step++) stepRing(twoLanes, [slow, fast], C, CAR_LENGTH, 1 / 60);
+for (let step = 0; step < 60 * 60; step++) stepLaneLoop(scene1State.net, twoLanes, [slow, fast], C, CAR_LENGTH, 1 / 60);
 assert(
   Math.abs(twoLanes[1].v - fast.v0) < 0.5,
   `fast car ignores the slow car in the other lane (v=${twoLanes[1].v.toFixed(2)})`,
@@ -123,21 +124,6 @@ const newCar = (s: number, v: number, lane: number, route = 0): Car => ({
 });
 
 const netOf = (...roads: Road[]): Network => buildNetwork(roads, roads.length > 1 ? [[0, 1]] : []);
-
-// Lane-backed loop topology preserves the old ring step behavior for the same inputs.
-{
-  const legacy = [newCar(0, 30, 0), newCar(C / 2, 12, 0)];
-  const laneBacked = [newCar(0, 30, 0), newCar(C / 2, 12, 0)];
-  for (let step = 0; step < 12 * 60; step++) {
-    stepRing(legacy, [fast, slow], C, CAR_LENGTH, 1 / 60);
-    SCENES[0].step(laneBacked, [fast, slow], CAR_LENGTH, 1 / 60, []);
-  }
-  legacy.forEach((car, i) => {
-    assert(Math.abs(car.s - laneBacked[i].s) < 1e-9, `lane loop preserves ring s for car ${i}`);
-    assert(Math.abs(car.v - laneBacked[i].v) < 1e-9, `lane loop preserves ring speed for car ${i}`);
-    assert(car.lane === laneBacked[i].lane, `lane loop preserves ring lane for car ${i}`);
-  });
-}
 
 function assertLanePointMatchesRoad(net: Network, road: Road, lane: number, s: number, msg: string): void {
   const base = road.point(s);

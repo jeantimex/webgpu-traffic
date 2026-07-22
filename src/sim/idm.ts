@@ -1,5 +1,5 @@
 /**
- * Intelligent Driver Model (IDM) on a circular two-lane track.
+ * Intelligent Driver Model (IDM) primitives.
  * https://en.wikipedia.org/wiki/Intelligent_driver_model
  */
 
@@ -50,72 +50,6 @@ const LANE_CHANGE_TIME = 2; // s for the lateral slide
 export const LANE_CHANGE_COOLDOWN = 4; // s between one car's lane changes (prevents weaving)
 export const B_SAFE = 4; // m/s², the most braking a lane change (or spawn) may impose on anyone
 export const DELTA_A = 0.2; // m/s², minimum advantage that makes a change worthwhile
-const KEEP_RIGHT_GAP = 60; // m, "inner lane is free ahead" threshold for drifting back
-
-interface LaneNeighbor {
-  index: number;
-  gap: number; // bumper-to-lead-position distance (m)
-  v: number;
-}
-
-/** Nearest car in `lane` ahead of (or behind) car `me`, measured along the ring. */
-function nearestInLane(
-  cars: Car[],
-  me: number,
-  lane: number,
-  circumference: number,
-  ahead: boolean,
-): LaneNeighbor | null {
-  let best: LaneNeighbor | null = null;
-  for (let j = 0; j < cars.length; j++) {
-    if (j === me || cars[j].lane !== lane) continue;
-    const d = (((cars[j].s - cars[me].s) % circumference) + circumference) % circumference;
-    const gap = ahead ? d : (circumference - d) % circumference;
-    if (best === null || gap < best.gap) best = { index: j, gap, v: cars[j].v };
-  }
-  return best;
-}
-
-function accelToward(car: Car, leader: LaneNeighbor | null, carLength: number, p: IdmParams): number {
-  return leader
-    ? idmAcceleration(car.v, leader.gap - carLength, car.v - leader.v, p)
-    : idmAcceleration(car.v, 1e6, 0, p);
-}
-
-/**
- * MOBIL-lite: a car changes lanes when the target lane is clearly better (overtake /
- * avoid a braking leader) — but only if neither it nor the target-lane follower has
- * to brake harder than B_SAFE. Cars also drift back to the inner lane when it's free
- * ahead. Obstacles (the red light) never trigger lane changes.
- */
-function updateLanes(cars: Car[], params: IdmParams[], circumference: number, carLength: number): void {
-  for (let i = 0; i < cars.length; i++) {
-    const car = cars[i];
-    if (car.cooldown > 0) continue;
-    const target = 1 - car.lane;
-    const accelHere = accelToward(car, nearestInLane(cars, i, car.lane, circumference, true), carLength, params[i]);
-    const accelThere = accelToward(car, nearestInLane(cars, i, target, circumference, true), carLength, params[i]);
-    const keepRight = target === 0 && accelThere >= accelHere - DELTA_A &&
-      (nearestInLane(cars, i, 0, circumference, true)?.gap ?? Infinity) > KEEP_RIGHT_GAP;
-    if (accelThere - accelHere < DELTA_A && !keepRight) continue;
-    // Safety first: no hard braking for me or for the car behind me in the target lane.
-    if (accelThere < -B_SAFE) continue;
-    const follower = nearestInLane(cars, i, target, circumference, false);
-    if (follower) {
-      const followerAccel = idmAcceleration(
-        follower.v,
-        follower.gap - carLength,
-        follower.v - car.v,
-        params[follower.index],
-      );
-      if (followerAccel < -B_SAFE) continue;
-    }
-    car.lane = target;
-    car.cooldown = LANE_CHANGE_COOLDOWN;
-    car.laneFrom = car.lateral;
-    car.laneProgress = 0;
-  }
-}
 
 /** Advances one car's cooldown and cosine-eased lane-change slide by dt (S-curve, zero jerk at both ends). */
 export function advanceLateral(car: Car, dt: number): void {
@@ -129,53 +63,5 @@ export function advanceLateral(car: Car, dt: number): void {
     if (p === 1) car.lateralVel = 0;
   } else {
     car.lateralVel = 0;
-  }
-}
-
-/**
- * Advances every car on the ring by one fixed step (semi-implicit Euler).
- * Each car follows the nearest car ahead of it in its lane and brakes for any
- * obstacles, whichever constraint is strongest. Includes MOBIL-lite lane changes.
- */
-export function stepRing(
-  cars: Car[],
-  params: IdmParams[],
-  circumference: number,
-  carLength: number,
-  dt: number,
-  obstacles: Obstacle[] = [],
-): void {
-  // ponytail: O(n²) leader search, trivial for a handful of cars; sort by arc position if the car count grows large.
-  const accels = cars.map((car, i) => {
-    let accel = idmAcceleration(car.v, 1e6, 0, params[i]); // free road
-    let gap = Infinity;
-    let vLeader = 0;
-    for (let j = 0; j < cars.length; j++) {
-      if (j === i || cars[j].lane !== car.lane) continue;
-      const d = (((cars[j].s - car.s) % circumference) + circumference) % circumference;
-      if (d < gap) {
-        gap = d;
-        vLeader = cars[j].v;
-      }
-    }
-    if (Number.isFinite(gap)) {
-      accel = Math.min(accel, idmAcceleration(car.v, gap - carLength, car.v - vLeader, params[i]));
-    }
-    for (const obstacle of obstacles) {
-      const d = (((obstacle.s - car.s) % circumference) + circumference) % circumference;
-      // The car's front bumper stops at the obstacle: subtract its own half length.
-      accel = Math.min(accel, idmAcceleration(car.v, d - carLength / 2, car.v, params[i]));
-    }
-    return accel;
-  });
-
-  updateLanes(cars, params, circumference, carLength);
-
-  for (let i = 0; i < cars.length; i++) {
-    const car = cars[i];
-    car.a = accels[i];
-    car.v = Math.max(0, car.v + car.a * dt);
-    car.s = (car.s + car.v * dt) % circumference;
-    advanceLateral(car, dt);
   }
 }
