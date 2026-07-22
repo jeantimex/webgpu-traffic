@@ -92,9 +92,21 @@ export function laneNode(net: Network, global: number): LaneNode {
 }
 
 export function laneConnectionFor(net: Network, global: number, route: number): LaneConnection | null {
-  const lane = laneNode(net, global);
-  const conns = net.exit[lane.road][lane.lane];
+  const conns = laneRouteConnections(net, global);
   return conns.length === 0 ? null : conns[Math.min(route, conns.length - 1)];
+}
+
+export function laneRouteConnections(net: Network, global: number): (LaneConnection | null)[] {
+  const lane = laneNode(net, global);
+  return net.exit[lane.road][lane.lane];
+}
+
+export function laneHasRouteTable(net: Network, global: number): boolean {
+  return laneRouteConnections(net, global).length > 0;
+}
+
+export function availableRouteIndices(net: Network, global: number): number[] {
+  return laneRouteConnections(net, global).flatMap((conn, i) => (conn ? [i] : []));
 }
 
 export function connectionTargetLane(net: Network, conn: LaneConnection): number {
@@ -198,11 +210,6 @@ export function buildNetwork(roads: Road[], links: RoadLink[]): Network {
   return net;
 }
 
-/** The connection a car follows at its lane's end, by route (clamped to what exists). */
-function connectionFor(net: Network, road: number, lane: number, route: number): LaneConnection | null {
-  return laneConnectionFor(net, globalLane(net, road, lane), route);
-}
-
 /** Nearest car in `laneIndex` (local, same road) ahead of (or behind) car `me`, in travel direction. */
 function nearestInLane(
   net: Network,
@@ -238,16 +245,14 @@ function downstream(
   net: Network,
   cars: Car[],
   me: number,
-  road: number,
-  lane: number,
+  global: number,
   distToExit: number,
   carLength: number,
 ): Constraint {
   let gap = distToExit;
-  let r = road;
-  let l = lane;
+  let g = global;
   for (let hop = 0; hop < 8; hop++) {
-    const conn = connectionFor(net, r, l, cars[me].route);
+    const conn = laneConnectionFor(net, g, cars[me].route);
     if (!conn) return { gap: gap - carLength / 2, vLead: 0 }; // stop sign at this end
     const tGlobal = connectionTargetLane(net, conn);
     const target = laneNode(net, tGlobal);
@@ -259,8 +264,7 @@ function downstream(
     }
     if (best) return { gap: gap + best.dist - carLength, vLead: best.v };
     gap += target.length;
-    r = conn.toRoad;
-    l = conn.toLane;
+    g = tGlobal;
   }
   return { gap: 1e6, vLead: 0 }; // closed loop with nobody downstream: free road
 }
@@ -313,7 +317,7 @@ function updateNetworkLanes(net: Network, cars: Car[], params: IdmParams[], carL
     if (bestTarget >= 0) {
       // If the car's route doesn't exist on the new lane, take what the lane offers
       // (wrong lane for the turn → go wherever the lane goes).
-      const conns = net.exit[ri][bestTarget];
+      const conns = laneRouteConnections(net, globalLane(net, ri, bestTarget));
       const usable = conns.length > 0 && conns[Math.min(car.route, conns.length - 1)];
       if (!usable) {
         const fallback = conns.findIndex((c) => c !== null);
@@ -337,19 +341,17 @@ export function stepNetwork(
   obstacles: NetObstacle[] = [],
 ): void {
   const accels = cars.map((car, i) => {
-    const { road: ri, lane: li } = locate(net, car.lane);
-    const road = net.roads[ri];
-    const dir = road.lanes[li].direction;
+    const lane = laneNode(net, car.lane);
     let accel = idmAcceleration(car.v, 1e6, 0, params[i]); // free road
-    const leader = nearestInLane(net, cars, i, ri, li, dir, true);
+    const leader = nearestInLane(net, cars, i, lane.road, lane.lane, lane.direction, true);
     if (leader) accel = Math.min(accel, accelToward(car, leader, carLength, params[i]));
-    const distToExit = dir > 0 ? road.length - car.s : car.s;
-    const down = downstream(net, cars, i, ri, li, distToExit, carLength);
+    const distToExit = lane.direction > 0 ? lane.length - car.s : car.s;
+    const down = downstream(net, cars, i, car.lane, distToExit, carLength);
     accel = Math.min(accel, idmAcceleration(car.v, down.gap, car.v - down.vLead, params[i]));
     // Signal stop lines on this lane (red phases).
     for (const obstacle of obstacles) {
       if (obstacle.lane !== car.lane) continue;
-      const d = (obstacle.s - car.s) * dir;
+      const d = (obstacle.s - car.s) * lane.direction;
       if (d > 0) accel = Math.min(accel, idmAcceleration(car.v, d - carLength / 2, car.v, params[i]));
     }
     return accel;
@@ -359,18 +361,16 @@ export function stepNetwork(
 
   for (let i = 0; i < cars.length; i++) {
     const car = cars[i];
-    const { road: ri, lane: li } = locate(net, car.lane);
-    const road = net.roads[ri];
-    const dir = road.lanes[li].direction;
+    const lane = laneNode(net, car.lane);
     car.a = accels[i];
     car.v = Math.max(0, car.v + car.a * dt);
-    car.s += dir * car.v * dt;
+    car.s += lane.direction * car.v * dt;
 
     // Seam crossing: remap to the connected road's lane, keeping speed and overshoot.
-    const exitS = dir > 0 ? road.length : 0;
-    const overshoot = (car.s - exitS) * dir;
+    const exitS = lane.direction > 0 ? lane.length : 0;
+    const overshoot = (car.s - exitS) * lane.direction;
     if (overshoot > 0) {
-      const conn = connectionFor(net, ri, li, car.route);
+      const conn = laneConnectionFor(net, car.lane, car.route);
       if (conn) {
         const target = laneNode(net, connectionTargetLane(net, conn));
         car.s = conn.entranceS + overshoot * target.direction;
@@ -406,14 +406,7 @@ export function networkSpawnSlot(
   carLength: number,
 ): { s: number; lane: number } | null {
   // Lanes already fed by any route connection are not spawn entrances.
-  const fed = new Set<number>();
-  net.roads.forEach((_, r) => {
-    net.exit[r].forEach((conns) => {
-      conns.forEach((conn) => {
-        if (conn) fed.add(connectionTargetLane(net, conn));
-      });
-    });
-  });
+  const fed = new Set(net.lanes.filter((lane) => lane.incomingConnections.length > 0).map((lane) => lane.global));
 
   let best: { s: number; lane: number } | null = null;
   let bestGap = -Infinity;

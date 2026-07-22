@@ -22,11 +22,14 @@ import {
   type Way,
 } from './intersection';
 import {
+  availableRouteIndices,
   buildNetwork,
   connectionTargetLane,
   laneConnectionFor,
+  laneHasRouteTable,
   laneNode,
   lanePathPoint,
+  laneRouteConnections,
   lateralNeighbors,
   locate,
   PriorityType,
@@ -299,6 +302,9 @@ for (const shape of ['straight', 'arc', 'scurve'] as const) {
   assert(net.lanes[1].incomingConnections.length === 1, 'lane graph mirrors incoming connections');
   assert(net.lanes[0].outgoingConnections[0].priority === PriorityType.DIRECT, 'connections default to direct priority');
   assert(laneConnectionFor(net, 0, 0) === net.exit[0][0][0], 'laneConnectionFor resolves route from global lane');
+  assert(laneRouteConnections(net, 0) === net.exit[0][0], 'laneRouteConnections exposes the route table by global lane');
+  assert(laneHasRouteTable(net, 0) && !laneHasRouteTable(net, 1), 'laneHasRouteTable distinguishes connected and open ends');
+  assert(availableRouteIndices(net, 0)[0] === 0, 'availableRouteIndices exposes usable route slots');
   assert(connectionTargetLane(net, net.lanes[0].outgoingConnections[0]) === 1, 'connectionTargetLane resolves global target');
   const car = [newCar(0, 12, 0)];
   let crossV = -1;

@@ -1,6 +1,6 @@
 import { MAX_CARS, NEW_CAR_PARAMS, type GuiState } from '../gui/settings_gui';
 import { type Car, type IdmParams } from '../sim/idm';
-import { locate } from '../sim/network';
+import { availableRouteIndices, laneHasRouteTable, laneNode } from '../sim/network';
 import { identity, lookAt, multiply, perspective, rotationZ, translationRotationY } from '../utils/mat4';
 import { OrbitCamera } from '../utils/orbit';
 import { createBufferWithData, resizeCanvasToDisplaySize, type WebGPUState } from '../webgpu/utils';
@@ -295,9 +295,8 @@ export class Renderer {
     if (net) {
       for (let g = 0; g < net.numLanes; g++) {
         if (net.closedLanes.has(g)) continue;
-        const { road: ri, lane: li } = locate(net, g);
-        const road = net.roads[ri];
-        return { s: road.lanes[li].direction > 0 ? 0 : road.length, lane: g };
+        const lane = laneNode(net, g);
+        return { s: lane.direction > 0 ? 0 : lane.length, lane: g };
       }
     }
     return { s: 0, lane: 0 };
@@ -341,7 +340,7 @@ export class Renderer {
     }
     this.cars = this.gui.settings.cars.map((params, i) => {
       const lane = laneFor(i);
-      const span = net ? net.roads[locate(net, lane).road].length : c;
+      const span = net ? laneNode(net, lane).length : c;
       return {
         s: START_FRACTIONS[i % START_FRACTIONS.length] * span,
         v: params.v0,
@@ -396,9 +395,7 @@ export class Renderer {
   /** Route indices available on a lane (scene 4); [0] elsewhere. */
   private availableRoutes(lane: number): number[] {
     if (this.scene !== 4 || !scene4State.state) return [0];
-    const net = scene4State.state.net;
-    const { road: ri, lane: li } = locate(net, lane);
-    return net.exit[ri][li].flatMap((conn, i) => (conn ? [i] : []));
+    return availableRouteIndices(scene4State.state.net, lane);
   }
 
   /** Cars stopped at an unconnected end "left the map": respawn them at a safe entrance. */
@@ -406,11 +403,9 @@ export class Renderer {
     const net = this.scene === 3 ? scene3State.net : this.scene === 4 ? (scene4State.state?.net ?? null) : null;
     if (!net) return;
     this.cars.forEach((car, i) => {
-      const { road: ri, lane: li } = locate(net, car.lane);
-      if (net.exit[ri][li].length > 0) return; // connected end: keeps flowing
-      const road = net.roads[ri];
-      const dir = road.lanes[li].direction;
-      const distToEnd = dir > 0 ? road.length - car.s : car.s;
+      const lane = laneNode(net, car.lane);
+      if (laneHasRouteTable(net, car.lane)) return; // connected end: keeps flowing
+      const distToEnd = lane.direction > 0 ? lane.length - car.s : car.s;
       if (distToEnd > 3 || car.v > 0.5) return;
       const slot = this.def.findSpawnSlot(
         this.cars,
