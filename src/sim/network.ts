@@ -79,14 +79,6 @@ export function globalLane(net: Network, road: number, lane: number): number {
   return net.laneOffsets[road] + lane;
 }
 
-/** Resolves a global lane index to (road, localLane). Linear scan: networks are tiny. */
-export function locate(net: Network, global: number): { road: number; lane: number } {
-  for (let r = net.roads.length - 1; r >= 0; r--) {
-    if (global >= net.laneOffsets[r]) return { road: r, lane: global - net.laneOffsets[r] };
-  }
-  return { road: 0, lane: 0 };
-}
-
 export function laneNode(net: Network, global: number): LaneNode {
   return net.lanes[global];
 }
@@ -248,7 +240,8 @@ interface Constraint {
 /**
  * What a car must brake for at its lane's end: the stop sign (unconnected), or the
  * tail car on the connected road — walking the chain while lanes are empty, so a
- * stop at the far end of the network propagates upstream.
+ * stop at the far end of the network propagates upstream. The walk is bounded by
+ * lane count, which also terminates empty closed loops as free road.
  */
 function downstream(
   net: Network,
@@ -260,7 +253,7 @@ function downstream(
 ): Constraint {
   let gap = distToExit;
   let g = global;
-  for (let hop = 0; hop < 8; hop++) {
+  for (let hop = 0; hop < net.lanes.length; hop++) {
     const conn = laneConnectionFor(net, g, cars[me].route);
     if (!conn) return { gap: gap - carLength / 2, vLead: 0 }; // stop sign at this end
     const tGlobal = connectionTargetLane(net, conn);

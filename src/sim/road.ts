@@ -34,6 +34,7 @@ export interface Lane {
   offset: number; // signed lateral offset from the path, + = right of forward heading
   leftNeighbor: number | null; // local lane index, null when no legal lane change exists
   rightNeighbor: number | null; // local lane index, null when no legal lane change exists
+  // Geometric lane-center heading. For backward lanes, travel direction is lane.direction * heading.
   point(s: number): PathPoint; // lane centerline point at arc position s
 }
 
