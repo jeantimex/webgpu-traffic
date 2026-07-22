@@ -10,6 +10,7 @@ import {
   buildNetwork,
   globalLane,
   locate,
+  rebuildLaneGraph,
   ROUTE_LEFT,
   type NetObstacle,
   type Network,
@@ -276,6 +277,7 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
   stream('w', 1).forEach((g) => opposing.set(g, [...stream('e', -1), ...connStream('ewConn', -1)]));
   stream('e', -1).forEach((g) => opposing.set(g, [...stream('w', 1), ...connStream('ewConn', 1)]));
 
+  rebuildLaneGraph(net);
   return { net, zoneHalf, entries: { ns, ew }, roadIndex, opposing };
 }
 

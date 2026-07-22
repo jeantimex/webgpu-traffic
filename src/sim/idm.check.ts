@@ -168,6 +168,8 @@ for (const shape of ['arc', 'scurve'] as const) {
 // Two lanes one-way: fast car changes lanes to overtake.
 {
   const net = netOf(new Road({ shape: 'straight', length: 400, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 }));
+  assert(net.lanes.length === net.numLanes, 'lane graph mirrors lane count');
+  assert(net.lanes[0].rightNeighbor === 1 && net.lanes[1].leftNeighbor === 0, 'lane graph records lateral neighbors');
   const race = [newCar(0, 30, 0), newCar(150, 12, 0)];
   let changed = false;
   let maxV = 0;
@@ -199,6 +201,8 @@ for (const shape of ['arc', 'scurve'] as const) {
   const a = new Road({ shape: 'straight', length: 150, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 0 });
   const b = new Road({ shape: 'straight', length: 150, radius: 50, angle: 90, lanesForward: 1, lanesBackward: 0 });
   const net = buildNetwork([a, b], [[0, 1]]);
+  assert(net.lanes[0].outgoingConnections[0] === net.exit[0][0][0], 'lane graph mirrors outgoing connections');
+  assert(net.lanes[1].incomingConnections.length === 1, 'lane graph mirrors incoming connections');
   const car = [newCar(0, 12, 0)];
   let crossV = -1;
   for (let step = 0; step < 14 * 60; step++) {

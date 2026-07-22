@@ -33,6 +33,21 @@ export interface LaneConnection {
   entranceS: number; // arc position where traffic enters the target road
 }
 
+/** Lane-level graph node derived from the road/lane arrays and route table. */
+export interface LaneNode {
+  id: string;
+  road: number;
+  lane: number; // local lane index on `road`
+  global: number;
+  length: number;
+  direction: 1 | -1;
+  offset: number;
+  leftNeighbor: number | null; // global lane index
+  rightNeighbor: number | null; // global lane index
+  outgoingConnections: LaneConnection[];
+  incomingConnections: LaneConnection[];
+}
+
 /** Route indices into a lane's connection list. */
 export const ROUTE_STRAIGHT = 0;
 export const ROUTE_RIGHT = 1;
@@ -43,6 +58,8 @@ export interface Network {
   /** Prefix sums of lane counts: global lane index = laneOffsets[road] + localLane. */
   laneOffsets: number[];
   numLanes: number;
+  /** Lane-level topology view. Kept additive for now; `exit` remains the source of routing behavior. */
+  lanes: LaneNode[];
   /** exit[road][lane] = route-indexed connections at that lane's travel end (empty = stop sign; null entry = route unavailable). */
   exit: (LaneConnection | null)[][][];
   /** Global lanes closed to spawning (e.g. an entry-closed approach at an intersection). */
@@ -61,8 +78,58 @@ export function locate(net: Network, global: number): { road: number; lane: numb
   return { road: 0, lane: 0 };
 }
 
+export function laneNode(net: Network, global: number): LaneNode {
+  return net.lanes[global];
+}
+
 /** A link between two road ends. end: 1 = road end (s = length), 0 = road start (s = 0). */
 export type RoadLink = [a: number, b: number, aEnd?: number, bEnd?: number];
+
+function uniqueConnections(conns: (LaneConnection | null)[]): LaneConnection[] {
+  return [...new Set(conns.filter((conn): conn is LaneConnection => conn !== null))];
+}
+
+/** Rebuilds the additive lane graph view from `roads` and the route-indexed `exit` table. */
+export function rebuildLaneGraph(net: Network): void {
+  const lanes: LaneNode[] = [];
+  net.roads.forEach((road, ri) => {
+    road.lanes.forEach((lane, li) => {
+      const global = globalLane(net, ri, li);
+      lanes[global] = {
+        id: `r${ri}:l${li}`,
+        road: ri,
+        lane: li,
+        global,
+        length: road.length,
+        direction: lane.direction,
+        offset: lane.offset,
+        leftNeighbor: null,
+        rightNeighbor: null,
+        outgoingConnections: uniqueConnections(net.exit[ri][li]),
+        incomingConnections: [],
+      };
+    });
+  });
+
+  net.roads.forEach((road, ri) => {
+    ([1, -1] as const).forEach((direction) => {
+      const sameDirection = road.lanes
+        .flatMap((lane, li) => (lane.direction === direction ? [globalLane(net, ri, li)] : []))
+        .sort((a, b) => lanes[a].direction * lanes[a].offset - lanes[b].direction * lanes[b].offset);
+      sameDirection.forEach((global, i) => {
+        lanes[global].leftNeighbor = sameDirection[i - 1] ?? null;
+        lanes[global].rightNeighbor = sameDirection[i + 1] ?? null;
+      });
+    });
+  });
+
+  lanes.forEach((lane) => {
+    lane.outgoingConnections.forEach((conn) => {
+      lanes[globalLane(net, conn.toRoad, conn.toLane)].incomingConnections.push(conn);
+    });
+  });
+  net.lanes = lanes;
+}
 
 /**
  * Builds a network from roads and links. Lane mapping is automatic: lanes exiting
@@ -107,7 +174,9 @@ export function buildNetwork(roads: Road[], links: RoadLink[]): Network {
       });
     }
   }
-  return { roads, laneOffsets, numLanes: total, exit, closedLanes: new Set() };
+  const net: Network = { roads, laneOffsets, numLanes: total, lanes: [], exit, closedLanes: new Set<number>() };
+  rebuildLaneGraph(net);
+  return net;
 }
 
 /** The connection a car follows at its lane's end, by route (clamped to what exists). */
