@@ -19,7 +19,18 @@ import {
   type IntersectionState,
   type Way,
 } from './intersection';
-import { buildNetwork, locate, PriorityType, stepNetwork, type NetObstacle, type Network } from './network';
+import {
+  buildNetwork,
+  connectionTargetLane,
+  laneConnectionFor,
+  laneNode,
+  lateralNeighbors,
+  locate,
+  PriorityType,
+  stepNetwork,
+  type NetObstacle,
+  type Network,
+} from './network';
 import { Road } from './road';
 
 function assert(cond: boolean, msg: string): void {
@@ -170,6 +181,8 @@ for (const shape of ['arc', 'scurve'] as const) {
   const net = netOf(new Road({ shape: 'straight', length: 400, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 }));
   assert(net.lanes.length === net.numLanes, 'lane graph mirrors lane count');
   assert(net.lanes[0].rightNeighbor === 1 && net.lanes[1].leftNeighbor === 0, 'lane graph records lateral neighbors');
+  assert(laneNode(net, 0).global === 0, 'laneNode resolves by global lane');
+  assert(lateralNeighbors(net, 0)[0] === 1, 'lateralNeighbors exposes adjacent lanes');
   const race = [newCar(0, 30, 0), newCar(150, 12, 0)];
   let changed = false;
   let maxV = 0;
@@ -204,6 +217,8 @@ for (const shape of ['arc', 'scurve'] as const) {
   assert(net.lanes[0].outgoingConnections[0] === net.exit[0][0][0], 'lane graph mirrors outgoing connections');
   assert(net.lanes[1].incomingConnections.length === 1, 'lane graph mirrors incoming connections');
   assert(net.lanes[0].outgoingConnections[0].priority === PriorityType.DIRECT, 'connections default to direct priority');
+  assert(laneConnectionFor(net, 0, 0) === net.exit[0][0][0], 'laneConnectionFor resolves route from global lane');
+  assert(connectionTargetLane(net, net.lanes[0].outgoingConnections[0]) === 1, 'connectionTargetLane resolves global target');
   const car = [newCar(0, 12, 0)];
   let crossV = -1;
   for (let step = 0; step < 14 * 60; step++) {

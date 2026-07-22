@@ -90,6 +90,21 @@ export function laneNode(net: Network, global: number): LaneNode {
   return net.lanes[global];
 }
 
+export function laneConnectionFor(net: Network, global: number, route: number): LaneConnection | null {
+  const lane = laneNode(net, global);
+  const conns = net.exit[lane.road][lane.lane];
+  return conns.length === 0 ? null : conns[Math.min(route, conns.length - 1)];
+}
+
+export function connectionTargetLane(net: Network, conn: LaneConnection): number {
+  return globalLane(net, conn.toRoad, conn.toLane);
+}
+
+export function lateralNeighbors(net: Network, global: number): number[] {
+  const lane = laneNode(net, global);
+  return [lane.leftNeighbor, lane.rightNeighbor].filter((n): n is number => n !== null);
+}
+
 /** A link between two road ends. end: 1 = road end (s = length), 0 = road start (s = 0). */
 export type RoadLink = [a: number, b: number, aEnd?: number, bEnd?: number];
 
@@ -191,8 +206,7 @@ export function buildNetwork(roads: Road[], links: RoadLink[]): Network {
 
 /** The connection a car follows at its lane's end, by route (clamped to what exists). */
 function connectionFor(net: Network, road: number, lane: number, route: number): LaneConnection | null {
-  const conns = net.exit[road][lane];
-  return conns.length === 0 ? null : conns[Math.min(route, conns.length - 1)];
+  return laneConnectionFor(net, globalLane(net, road, lane), route);
 }
 
 /** Nearest car in `laneIndex` (local, same road) ahead of (or behind) car `me`, in travel direction. */
@@ -241,17 +255,16 @@ function downstream(
   for (let hop = 0; hop < 8; hop++) {
     const conn = connectionFor(net, r, l, cars[me].route);
     if (!conn) return { gap: gap - carLength / 2, vLead: 0 }; // stop sign at this end
-    const tRoad = net.roads[conn.toRoad];
-    const tDir = tRoad.lanes[conn.toLane].direction;
-    const tGlobal = globalLane(net, conn.toRoad, conn.toLane);
+    const tGlobal = connectionTargetLane(net, conn);
+    const target = laneNode(net, tGlobal);
     let best: { dist: number; v: number } | null = null;
     for (let j = 0; j < cars.length; j++) {
       if (j === me || cars[j].lane !== tGlobal) continue;
-      const dist = tDir > 0 ? cars[j].s : tRoad.length - cars[j].s;
+      const dist = target.direction > 0 ? cars[j].s : target.length - cars[j].s;
       if (best === null || dist < best.dist) best = { dist, v: cars[j].v };
     }
     if (best) return { gap: gap + best.dist - carLength, vLead: best.v };
-    gap += tRoad.length;
+    gap += target.length;
     r = conn.toRoad;
     l = conn.toLane;
   }
@@ -276,22 +289,21 @@ function updateNetworkLanes(net: Network, cars: Car[], params: IdmParams[], carL
   for (let i = 0; i < cars.length; i++) {
     const car = cars[i];
     if (car.cooldown > 0) continue;
-    const { road: ri, lane: li } = locate(net, car.lane);
-    const road = net.roads[ri];
-    const dir = road.lanes[li].direction;
+    const current = laneNode(net, car.lane);
+    const { road: ri, lane: li, direction: dir } = current;
     // A route's meaning is lane-indexed, so changing lanes near an exit can strand a
     // car on a lane where its route doesn't exist (e.g. a turning car stuck going
     // straight). Like real drivers, cars commit to their lane before the intersection.
-    const distToExit = dir > 0 ? road.length - car.s : car.s;
+    const distToExit = dir > 0 ? current.length - car.s : car.s;
     if (distToExit < LANE_CHANGE_MIN_DIST) continue;
     const accelHere = accelToward(car, nearestInLane(net, cars, i, ri, li, dir, true), carLength, params[i]);
     let bestTarget = -1;
     let bestAccel = accelHere + DELTA_A;
-    road.lanes.forEach((other, target) => {
-      if (other.direction !== dir || Math.abs(other.offset - road.lanes[li].offset) !== 4) return;
-      const accelThere = accelToward(car, nearestInLane(net, cars, i, ri, target, dir, true), carLength, params[i]);
+    lateralNeighbors(net, car.lane).forEach((targetGlobal) => {
+      const targetLane = laneNode(net, targetGlobal);
+      const accelThere = accelToward(car, nearestInLane(net, cars, i, ri, targetLane.lane, dir, true), carLength, params[i]);
       if (accelThere <= bestAccel || accelThere < -B_SAFE) return;
-      const follower = nearestInLane(net, cars, i, ri, target, dir, false);
+      const follower = nearestInLane(net, cars, i, ri, targetLane.lane, dir, false);
       if (follower) {
         const followerAccel = idmAcceleration(
           follower.v,
@@ -301,7 +313,7 @@ function updateNetworkLanes(net: Network, cars: Car[], params: IdmParams[], carL
         );
         if (followerAccel < -B_SAFE) return;
       }
-      bestTarget = target;
+      bestTarget = targetLane.lane;
       bestAccel = accelThere;
     });
     if (bestTarget >= 0) {
@@ -366,9 +378,9 @@ export function stepNetwork(
     if (overshoot > 0) {
       const conn = connectionFor(net, ri, li, car.route);
       if (conn) {
-        const tDir = net.roads[conn.toRoad].lanes[conn.toLane].direction;
-        car.s = conn.entranceS + overshoot * tDir;
-        car.lane = globalLane(net, conn.toRoad, conn.toLane);
+        const target = laneNode(net, connectionTargetLane(net, conn));
+        car.s = conn.entranceS + overshoot * target.direction;
+        car.lane = target.global;
         car.lateral = car.lane;
         car.laneFrom = car.lane;
         car.laneProgress = 1;
@@ -383,9 +395,8 @@ export function stepNetwork(
 
 /** Bumper gap to the nearest car ahead in the same lane, or null when alone. */
 export function networkGapAhead(net: Network, cars: Car[], i: number, carLength: number): number | null {
-  const { road: ri, lane: li } = locate(net, cars[i].lane);
-  const dir = net.roads[ri].lanes[li].direction;
-  const leader = nearestInLane(net, cars, i, ri, li, dir, true);
+  const lane = laneNode(net, cars[i].lane);
+  const leader = nearestInLane(net, cars, i, lane.road, lane.lane, lane.direction, true);
   return leader ? leader.gap - carLength : null;
 }
 
@@ -405,7 +416,7 @@ export function networkSpawnSlot(
   net.roads.forEach((_, r) => {
     net.exit[r].forEach((conns) => {
       conns.forEach((conn) => {
-        if (conn) fed.add(globalLane(net, conn.toRoad, conn.toLane));
+        if (conn) fed.add(connectionTargetLane(net, conn));
       });
     });
   });
