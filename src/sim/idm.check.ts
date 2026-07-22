@@ -600,6 +600,34 @@ console.log('Turn checks passed');
   assert(laneNode(state.net, cars[1].lane).road === state.roadIndex.s, 'E turns right onto S in an L');
 }
 
+// Two-lane L corner: when straight and one side are closed, every entering lane
+// gets a lane-matched forced turn instead of parking at the zone edge.
+{
+  const state = intersectionOf({ n: 'both', e: 'open', s: 'open', w: 'both' }, 2);
+  const sLanes = [0, 1].map((li) => state.net.laneOffsets[state.roadIndex.s] + li);
+  const eLanes = [2, 3].map((li) => state.net.laneOffsets[state.roadIndex.e] + li);
+  for (const [i, g] of sLanes.entries()) {
+    const conn = laneConnectionFor(state.net, g, 2);
+    assert(conn !== null && conn.toRoad !== state.roadIndex.nsConn, `S lane ${i} has a forced left turn`);
+    const car = [newCar(0, 12, g, 2)];
+    for (let step = 0; step < 25 * 60; step++) {
+      stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, leftTurnYieldObstacles(state, car));
+    }
+    const lane = laneNode(state.net, car[0].lane);
+    assert(lane.road === state.roadIndex.e && lane.lane === i, `S lane ${i} turns into matching E lane`);
+  }
+  for (const [i, g] of eLanes.entries()) {
+    const conn = laneConnectionFor(state.net, g, 1);
+    assert(conn !== null && conn.toRoad !== state.roadIndex.ewConn, `E lane ${i} has a forced right turn`);
+    const car = [newCar(20, 12, g, 1)];
+    for (let step = 0; step < 25 * 60; step++) {
+      stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, leftTurnYieldObstacles(state, car));
+    }
+    const lane = laneNode(state.net, car[0].lane);
+    assert(lane.road === state.roadIndex.s && lane.lane === i + 2, `E lane ${i} turns into matching S lane`);
+  }
+}
+
 // One-way-in: S exit closed — S traffic enters and crosses, but nothing flows back into S.
 {
   const state = intersectionOf({ n: 'open', e: 'open', s: 'out', w: 'open' });

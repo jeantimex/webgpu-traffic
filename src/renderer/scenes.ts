@@ -705,7 +705,6 @@ export function buildScene4(cfg: IntersectionConfig, handed = 1): void {
   const zh = state.zoneHalf;
   const L = cfg.approach;
   const edge = 4 * cfg.lanesEachWay + 1.2; // lamp offset from the approach centerline
-  const outer = 4 * cfg.lanesEachWay - 2; // outer turn-lane offset
   const ri = state.roadIndex;
   const has = (key: string): boolean => ri[key] !== undefined;
   const canEnter = (way: 'n' | 'e' | 's' | 'w'): boolean =>
@@ -720,15 +719,9 @@ export function buildScene4(cfg: IntersectionConfig, handed = 1): void {
   put('w', state.net.roads[ri.w], L, { x: -zh, z: 0, hx: 1, hz: 0 });
   put('nsConn', state.net.roads[ri.nsConn], 0, { x: 0, z: -zh, hx: 0, hz: 1 });
   put('ewConn', state.net.roads[ri.ewConn], 0, { x: -zh, z: 0, hx: 1, hz: 0 });
-  // Turn arcs, pinned at their entry lane positions (mirrored with handedness).
-  put('sRight', state.net.roads[ri.sRight], 0, { x: -outer * handed, z: -zh, hx: 0, hz: 1 });
-  put('sLeft', state.net.roads[ri.sLeft], 0, { x: -2 * handed, z: -zh, hx: 0, hz: 1 });
-  put('nRight', state.net.roads[ri.nRight], 0, { x: outer * handed, z: zh, hx: 0, hz: -1 });
-  put('nLeft', state.net.roads[ri.nLeft], 0, { x: 2 * handed, z: zh, hx: 0, hz: -1 });
-  put('eRight', state.net.roads[ri.eRight], 0, { x: zh, z: -outer * handed, hx: -1, hz: 0 });
-  put('eLeft', state.net.roads[ri.eLeft], 0, { x: zh, z: -2 * handed, hx: -1, hz: 0 });
-  put('wRight', state.net.roads[ri.wRight], 0, { x: -zh, z: outer * handed, hx: 1, hz: 0 });
-  put('wLeft', state.net.roads[ri.wLeft], 0, { x: -zh, z: 2 * handed, hx: 1, hz: 0 });
+  // Turn arcs are pinned at their authored entry lane positions. Forced L-corner
+  // turns may include extra lane-specific arcs beyond the normal dedicated lanes.
+  state.turns.forEach((turn) => put(turn.key, state.net.roads[ri[turn.key]], 0, turn.spec.entry));
 
   // Lamp stacks on the right side of each entering approach, just before its stop line.
   scene4State.lamps = [

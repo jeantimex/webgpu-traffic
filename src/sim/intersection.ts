@@ -51,7 +51,15 @@ export interface TurnSpec {
  * exit pose on the matching destination lane (outer → outer, inner → inner), and the
  * arc radius that joins them with a 90° sweep. All numeric — no hand-tuned radii.
  */
-export function turnArcSpec(from: Way, to: Way, kind: 'right' | 'left', lanes: number, handed: number): TurnSpec {
+function turnArcLaneSpec(
+  from: Way,
+  to: Way,
+  kind: 'right' | 'left',
+  lanes: number,
+  handed: number,
+  srcLane: number,
+  dstLane: number,
+): TurnSpec {
   const zoneHalf = 4 * lanes;
   const geom: Record<Way, { edge: [number, number]; h: [number, number]; r: [number, number] }> = {
     s: { edge: [0, -zoneHalf], h: [0, 1], r: [-1, 0] },
@@ -62,9 +70,6 @@ export function turnArcSpec(from: Way, to: Way, kind: 'right' | 'left', lanes: n
   const enteringDir = (way: Way): number => (way === 'n' || way === 'e' ? -1 : 1);
   const dirF = enteringDir(from);
   const dirT = -enteringDir(to);
-  // Right turns from the outermost lane, left turns from the innermost, both sides.
-  const srcLane = kind === 'right' ? (dirF > 0 ? lanes - 1 : 2 * lanes - 1) : dirF > 0 ? 0 : lanes;
-  const dstLane = kind === 'right' ? (dirT > 0 ? lanes - 1 : 2 * lanes - 1) : dirT > 0 ? 0 : lanes;
   const o1 = dirF > 0 ? (2 + 4 * srcLane) * handed : -(2 + 4 * (srcLane - lanes)) * handed;
   const o2 = dirT > 0 ? (2 + 4 * dstLane) * handed : -(2 + 4 * (dstLane - lanes)) * handed;
   const g1 = geom[from];
@@ -81,6 +86,16 @@ export function turnArcSpec(from: Way, to: Way, kind: 'right' | 'left', lanes: n
   return { radius, entry, exit, srcLane, dstLane };
 }
 
+export function turnArcSpec(from: Way, to: Way, kind: 'right' | 'left', lanes: number, handed: number): TurnSpec {
+  const enteringDir = (way: Way): number => (way === 'n' || way === 'e' ? -1 : 1);
+  const dirF = enteringDir(from);
+  const dirT = -enteringDir(to);
+  // Right turns from the outermost lane, left turns from the innermost, both sides.
+  const srcLane = kind === 'right' ? (dirF > 0 ? lanes - 1 : 2 * lanes - 1) : dirF > 0 ? 0 : lanes;
+  const dstLane = kind === 'right' ? (dirT > 0 ? lanes - 1 : 2 * lanes - 1) : dirT > 0 ? 0 : lanes;
+  return turnArcLaneSpec(from, to, kind, lanes, handed, srcLane, dstLane);
+}
+
 export interface IntersectionState {
   net: Network;
   zoneHalf: number; // half the zone's side length (m)
@@ -88,6 +103,8 @@ export interface IntersectionState {
   entries: { ns: NetObstacle[]; ew: NetObstacle[] };
   /** Road indices by key: 's' | 'n' | 'e' | 'w' | 'nsConn' | 'ewConn' | 'sRight' | ... */
   roadIndex: Record<string, number>;
+  /** Authored turn roads, including extra lane-specific arcs for forced L-corner turns. */
+  turns: { key: string; from: Way; to: Way; kind: 'right' | 'left'; spec: TurnSpec }[];
   /** Opposing stream lanes per approach lane (for left-turn yield). */
   opposing: Map<number, number[]>;
 }
@@ -121,6 +138,7 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
   const canExit = (way: Way): boolean => cfg.closed[way] === 'open' || cfg.closed[way] === 'in';
   /** Travel direction into the zone for a way's entering lanes. */
   const enteringDir = (way: Way): number => (way === 'n' || way === 'e' ? -1 : 1);
+  const opposite = (way: Way): Way => ({ n: 's', s: 'n', e: 'w', w: 'e' })[way] as Way;
 
   const zoneHalf = 4 * lanes; // the zone is exactly as wide as the roads it joins
   const roadIndex: Record<string, number> = {};
@@ -141,18 +159,44 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
 
   // Turn arcs: radius solved per movement from the entry/exit lane geometry, so
   // multi-lane intersections curve onto the matching lane instead of guessing radii.
-  const moves: { key: string; from: Way; to: Way; spec: TurnSpec }[] = [
-    { key: 'sRight', from: 's', to: 'w', spec: turnArcSpec('s', 'w', 'right', lanes, handed) },
-    { key: 'sLeft', from: 's', to: 'e', spec: turnArcSpec('s', 'e', 'left', lanes, handed) },
-    { key: 'nRight', from: 'n', to: 'e', spec: turnArcSpec('n', 'e', 'right', lanes, handed) },
-    { key: 'nLeft', from: 'n', to: 'w', spec: turnArcSpec('n', 'w', 'left', lanes, handed) },
-    { key: 'eRight', from: 'e', to: 's', spec: turnArcSpec('e', 's', 'right', lanes, handed) },
-    { key: 'eLeft', from: 'e', to: 'n', spec: turnArcSpec('e', 'n', 'left', lanes, handed) },
-    { key: 'wRight', from: 'w', to: 'n', spec: turnArcSpec('w', 'n', 'right', lanes, handed) },
-    { key: 'wLeft', from: 'w', to: 's', spec: turnArcSpec('w', 's', 'left', lanes, handed) },
+  const baseMoves: { key: string; from: Way; to: Way; kind: 'right' | 'left' }[] = [
+    { key: 'sRight', from: 's', to: 'w', kind: 'right' },
+    { key: 'sLeft', from: 's', to: 'e', kind: 'left' },
+    { key: 'nRight', from: 'n', to: 'e', kind: 'right' },
+    { key: 'nLeft', from: 'n', to: 'w', kind: 'left' },
+    { key: 'eRight', from: 'e', to: 's', kind: 'right' },
+    { key: 'eLeft', from: 'e', to: 'n', kind: 'left' },
+    { key: 'wRight', from: 'w', to: 'n', kind: 'right' },
+    { key: 'wLeft', from: 'w', to: 's', kind: 'left' },
   ];
+  const laneOrder = (kind: 'right' | 'left', dir: number): number[] => {
+    const ids = dir > 0
+      ? Array.from({ length: lanes }, (_, i) => i)
+      : Array.from({ length: lanes }, (_, i) => lanes + i);
+    return kind === 'right' ? ids.reverse() : ids;
+  };
+  const moves: { key: string; from: Way; to: Way; kind: 'right' | 'left'; spec: TurnSpec }[] = [];
+  for (const m of baseMoves) {
+    if (!canEnter(m.from) || !canExit(m.to)) continue;
+    const availableTurns = baseMoves.filter((candidate) => candidate.from === m.from && canExit(candidate.to));
+    const forcedOnlyTurn = !canExit(opposite(m.from)) && availableTurns.length === 1;
+    if (!forcedOnlyTurn) {
+      moves.push({ ...m, spec: turnArcSpec(m.from, m.to, m.kind, lanes, handed) });
+      continue;
+    }
+    const srcOrder = laneOrder(m.kind, enteringDir(m.from));
+    const dstOrder = laneOrder(m.kind, -enteringDir(m.to));
+    srcOrder.forEach((srcLane, i) => {
+      const key = i === 0 ? m.key : `${m.key}Lane${srcLane}`;
+      moves.push({
+        ...m,
+        key,
+        spec: turnArcLaneSpec(m.from, m.to, m.kind, lanes, handed, srcLane, dstOrder[i]),
+      });
+    });
+  }
   for (const m of moves) {
-    if (canEnter(m.from) && canExit(m.to)) add(m.key, mkArc(m.spec.radius, m.key.endsWith('Right') ? 90 : -90));
+    add(m.key, mkArc(m.spec.radius, m.kind === 'right' ? 90 : -90));
   }
 
   const links: RoadLink[] = [];
@@ -202,6 +246,10 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
   // straight route (available only if it exits somewhere), turn arcs are right/left.
   // Right turns from the lane farthest from the yellow line, left from the closest;
   // others fall back to straight.
+  const turnForLane = (way: Way, kind: 'right' | 'left', lane: number): number | undefined => {
+    const move = moves.find((m) => m.from === way && m.kind === kind && m.spec.srcLane === lane);
+    return move ? roadIndex[move.key] : undefined;
+  };
   const connectorViable = (r: number, dir: number): boolean =>
     net.roads[r].lanes.some(
       (lane, li) => lane.direction === dir && laneRouteConnections(net, globalLane(net, r, li)).some((c) => c !== null),
@@ -219,20 +267,25 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
       // Straight is only a real route when the connector still exits somewhere; a
       // closed far side means this approach must turn instead of stopping mid-zone.
       const straight = found && connectorViable(found.toRoad, lane.direction) ? found : null;
-      const right = has(`${way}Right`)
-        ? conns.find((c) => c !== null && c.toRoad === roadIndex[`${way}Right`]) ?? null
+      const rightRoad = turnForLane(way, 'right', li) ?? (has(`${way}Right`) ? roadIndex[`${way}Right`] : undefined);
+      const leftRoad = turnForLane(way, 'left', li) ?? (has(`${way}Left`) ? roadIndex[`${way}Left`] : undefined);
+      const right = rightRoad !== undefined
+        ? conns.find((c) => c !== null && c.toRoad === rightRoad) ?? null
         : null;
-      const left = has(`${way}Left`)
-        ? conns.find((c) => c !== null && c.toRoad === roadIndex[`${way}Left`]) ?? null
+      const left = leftRoad !== undefined
+        ? conns.find((c) => c !== null && c.toRoad === leftRoad) ?? null
         : null;
       const forwardOuter = lane.direction > 0 && li === lanes - 1;
       const forwardInner = lane.direction > 0 && li === 0;
       const backwardOuter = lane.direction < 0 && li === net.roads[r].lanes.length - 1;
       const backwardInner = lane.direction < 0 && li === lanes;
+      const onlyRight = right !== null && straight === null && left === null;
+      const onlyLeft = left !== null && straight === null && right === null;
+      const forced = onlyRight ? right : onlyLeft ? left : null;
       setLaneRouteConnections(net, g, [
-        straight,
-        forwardOuter || backwardOuter ? (right ?? straight) : straight,
-        forwardInner || backwardInner ? (left ?? straight) : straight,
+        straight ?? forced,
+        onlyRight || forwardOuter || backwardOuter ? (right ?? straight) : straight,
+        onlyLeft || forwardInner || backwardInner ? (left ?? straight) : straight,
       ]);
     });
   }
@@ -281,7 +334,7 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
   stream('e', -1).forEach((g) => opposing.set(g, [...stream('w', 1), ...connStream('ewConn', 1)]));
 
   rebuildLaneGraph(net);
-  return { net, zoneHalf, entries: { ns, ew }, roadIndex, opposing };
+  return { net, zoneHalf, entries: { ns, ew }, roadIndex, turns: moves, opposing };
 }
 
 export type IntersectionPhase = 'nsGreen' | 'nsYellow' | 'ewGreen' | 'ewYellow' | 'allRed';
