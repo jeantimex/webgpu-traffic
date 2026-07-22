@@ -179,12 +179,15 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
   for (const m of baseMoves) {
     if (!canEnter(m.from) || !canExit(m.to)) continue;
     const availableTurns = baseMoves.filter((candidate) => candidate.from === m.from && canExit(candidate.to));
-    const forcedOnlyTurn = !canExit(opposite(m.from)) && availableTurns.length === 1;
-    if (!forcedOnlyTurn) {
+    const straightUnavailable = !canExit(opposite(m.from));
+    if (!straightUnavailable) {
       moves.push({ ...m, spec: turnArcSpec(m.from, m.to, m.kind, lanes, handed) });
       continue;
     }
-    const srcOrder = laneOrder(m.kind, enteringDir(m.from));
+    const leftCount = availableTurns.length === 1 || lanes === 1 ? lanes : Math.ceil(lanes / 2);
+    const rightCount = availableTurns.length === 1 || lanes === 1 ? lanes : lanes - leftCount;
+    const assignedCount = m.kind === 'left' ? leftCount : rightCount;
+    const srcOrder = laneOrder(m.kind, enteringDir(m.from)).slice(0, assignedCount);
     const dstOrder = laneOrder(m.kind, -enteringDir(m.to));
     srcOrder.forEach((srcLane, i) => {
       const key = i === 0 ? m.key : `${m.key}Lane${srcLane}`;
@@ -267,8 +270,8 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
       // Straight is only a real route when the connector still exits somewhere; a
       // closed far side means this approach must turn instead of stopping mid-zone.
       const straight = found && connectorViable(found.toRoad, lane.direction) ? found : null;
-      const rightRoad = turnForLane(way, 'right', li) ?? (has(`${way}Right`) ? roadIndex[`${way}Right`] : undefined);
-      const leftRoad = turnForLane(way, 'left', li) ?? (has(`${way}Left`) ? roadIndex[`${way}Left`] : undefined);
+      const rightRoad = turnForLane(way, 'right', li) ?? (straight !== null && has(`${way}Right`) ? roadIndex[`${way}Right`] : undefined);
+      const leftRoad = turnForLane(way, 'left', li) ?? (straight !== null && has(`${way}Left`) ? roadIndex[`${way}Left`] : undefined);
       const right = rightRoad !== undefined
         ? conns.find((c) => c !== null && c.toRoad === rightRoad) ?? null
         : null;

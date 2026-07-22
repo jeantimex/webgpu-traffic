@@ -576,13 +576,38 @@ console.log('Turn checks passed');
   assert(state.roadIndex.n === undefined, 'N road is not built');
   assert(state.roadIndex.nsConn === undefined, 'NS connector dropped when N is closed');
   const sFwd = state.net.laneOffsets[state.roadIndex.s];
-  assert(!laneConnectionFor(state.net, sFwd, 0), 'S straight route is unavailable');
+  const straight = laneConnectionFor(state.net, sFwd, 0);
+  assert(
+    straight === null || (state.roadIndex.nsConn !== undefined && straight.toRoad !== state.roadIndex.nsConn),
+    'S straight route is remapped away from the closed leg',
+  );
 
   const car = [newCar(0, 12, sFwd, 2)]; // S-left still flows
   for (let step = 0; step < 20 * 60; step++) {
     stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, signalWithYield(state, car));
   }
   assert(laneNode(state.net, car[0].lane).road === state.roadIndex.e, 'S turns left onto E in a T');
+}
+
+// Multi-lane T: when the far side is closed but both side turns are open, every
+// lane is assigned a lane-specific turn instead of dead-ending at the zone.
+for (const lanesEachWay of [4, 6, 8]) {
+  const state = intersectionOf({ n: 'both', e: 'open', s: 'open', w: 'open' }, lanesEachWay);
+  const sBase = state.net.laneOffsets[state.roadIndex.s];
+  const leftCount = Math.ceil(lanesEachWay / 2);
+  for (let li = 0; li < lanesEachWay; li++) {
+    const g = sBase + li;
+    const route = li < leftCount ? 2 : 1;
+    const expectedRoad = li < leftCount ? state.roadIndex.e : state.roadIndex.w;
+    const conn = laneConnectionFor(state.net, g, route);
+    assert(conn !== null && conn.toRoad !== state.roadIndex.nsConn, `S lane ${li} has a T turn route (${lanesEachWay} lanes)`);
+    const car = [newCar(0, 12, g, route)];
+    for (let step = 0; step < 25 * 60; step++) {
+      stepNetwork(state.net, car, [slow], CAR_LENGTH, 1 / 60, leftTurnYieldObstacles(state, car));
+    }
+    const lane = laneNode(state.net, car[0].lane);
+    assert(lane.road === expectedRoad, `S lane ${li} turns through the T (${lanesEachWay} lanes)`);
+  }
 }
 
 // L corner: N and W fully closed — the surviving movements are S-left → E and E-right → S.
@@ -652,7 +677,7 @@ for (const lanesEachWay of [2, 3, 4]) {
 {
   const state = intersectionOf({ n: 'out', e: 'open', s: 'open', w: 'open' });
   const sFwd = state.net.laneOffsets[state.roadIndex.s];
-  assert(!laneConnectionFor(state.net, sFwd, 0), 'S straight route unavailable when N exit is closed');
+  assert(laneConnectionFor(state.net, sFwd, 0)?.toRoad !== state.roadIndex.nsConn, 'S straight route remapped when N exit is closed');
   // N backward straight still flows (into S, which is open).
   const nBack = state.net.laneOffsets[state.roadIndex.n] + 1;
   const cars = [newCar(0, 12, sFwd, 1), newCar(30, 12, nBack, 0)];
