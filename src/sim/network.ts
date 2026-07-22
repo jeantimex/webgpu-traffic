@@ -26,11 +26,19 @@ export interface NetObstacle {
   s: number;
 }
 
+export enum PriorityType {
+  DIRECT = 'DIRECT',
+  MERGE = 'MERGE',
+  DIVERGE = 'DIVERGE',
+  YIELD = 'YIELD',
+}
+
 /** A lane exit connected to another road's lane entrance. */
 export interface LaneConnection {
   toRoad: number;
   toLane: number; // local lane index on the target road
   entranceS: number; // arc position where traffic enters the target road
+  priority: PriorityType;
 }
 
 /** Lane-level graph node derived from the road/lane arrays and route table. */
@@ -161,6 +169,7 @@ export function buildNetwork(roads: Road[], links: RoadLink[]): Network {
           toRoad: b,
           toLane: enterB[Math.min(i, enterB.length - 1)],
           entranceS: bEnd === 0 ? 0 : roads[b].length,
+          priority: PriorityType.DIRECT,
         });
       });
     }
@@ -170,6 +179,7 @@ export function buildNetwork(roads: Road[], links: RoadLink[]): Network {
           toRoad: a,
           toLane: enterA[Math.min(j, enterA.length - 1)],
           entranceS: aEnd === 0 ? 0 : roads[a].length,
+          priority: PriorityType.DIRECT,
         });
       });
     }

@@ -19,7 +19,7 @@ import {
   type IntersectionState,
   type Way,
 } from './intersection';
-import { buildNetwork, locate, stepNetwork, type NetObstacle, type Network } from './network';
+import { buildNetwork, locate, PriorityType, stepNetwork, type NetObstacle, type Network } from './network';
 import { Road } from './road';
 
 function assert(cond: boolean, msg: string): void {
@@ -203,6 +203,7 @@ for (const shape of ['arc', 'scurve'] as const) {
   const net = buildNetwork([a, b], [[0, 1]]);
   assert(net.lanes[0].outgoingConnections[0] === net.exit[0][0][0], 'lane graph mirrors outgoing connections');
   assert(net.lanes[1].incomingConnections.length === 1, 'lane graph mirrors incoming connections');
+  assert(net.lanes[0].outgoingConnections[0].priority === PriorityType.DIRECT, 'connections default to direct priority');
   const car = [newCar(0, 12, 0)];
   let crossV = -1;
   for (let step = 0; step < 14 * 60; step++) {
