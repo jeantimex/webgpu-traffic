@@ -9,9 +9,12 @@ import type { Car } from './idm';
 import {
   buildNetwork,
   globalLane,
-  locate,
+  laneConnectionFor,
+  laneNode,
+  laneRouteConnections,
   rebuildLaneGraph,
   ROUTE_LEFT,
+  setLaneRouteConnections,
   type NetObstacle,
   type Network,
   type RoadLink,
@@ -169,7 +172,7 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
   // Turn arcs exit onto the matching destination lane (outer → outer, inner → inner).
   for (const m of moves) {
     if (has(m.key)) {
-      const conn = net.exit[roadIndex[m.key]][0][0];
+      const conn = laneConnectionFor(net, globalLane(net, roadIndex[m.key], 0), 0);
       if (conn) conn.toLane = m.spec.dstLane;
     }
   }
@@ -177,20 +180,19 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
   // Exit-closed ways: nothing may flow into them.
   for (const way of ['s', 'n', 'e', 'w'] as Way[]) {
     if (!canExit(way) && has(way)) {
-      net.exit.forEach((roadExits) =>
-        roadExits.forEach((conns) => {
-          conns.forEach((conn, i) => {
-            if (conn && conn.toRoad === roadIndex[way]) conns[i] = null;
-          });
-        }),
-      );
+      net.lanes.forEach((lane) => {
+        laneRouteConnections(net, lane.global).forEach((conn, i, conns) => {
+          if (conn && conn.toRoad === roadIndex[way]) conns[i] = null;
+        });
+      });
     }
     // Entry-closed ways: entering lanes dead-end at the zone edge and take no spawns.
     if (!canEnter(way) && has(way)) {
       net.roads[roadIndex[way]].lanes.forEach((lane, li) => {
         if (lane.direction === enteringDir(way)) {
-          net.exit[roadIndex[way]][li] = [];
-          net.closedLanes.add(globalLane(net, roadIndex[way], li));
+          const g = globalLane(net, roadIndex[way], li);
+          setLaneRouteConnections(net, g, []);
+          net.closedLanes.add(g);
         }
       });
     }
@@ -202,13 +204,14 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
   // others fall back to straight.
   const connectorViable = (r: number, dir: number): boolean =>
     net.roads[r].lanes.some(
-      (lane, li) => lane.direction === dir && net.exit[r][li].some((c) => c !== null),
+      (lane, li) => lane.direction === dir && laneRouteConnections(net, globalLane(net, r, li)).some((c) => c !== null),
     );
   for (const way of ['s', 'n', 'e', 'w'] as Way[]) {
     if (!canEnter(way) || !has(way)) continue;
     const r = roadIndex[way];
     net.roads[r].lanes.forEach((lane, li) => {
-      const conns = net.exit[r][li];
+      const g = globalLane(net, r, li);
+      const conns = laneRouteConnections(net, g);
       if (conns.length === 0) return; // lanes leaving the zone, not entering it
       const found =
         conns.find((c) => c !== null && (c.toRoad === roadIndex.nsConn || c.toRoad === roadIndex.ewConn)) ??
@@ -226,11 +229,11 @@ export function buildIntersection(cfg: IntersectionConfig, handed = 1): Intersec
       const forwardInner = lane.direction > 0 && li === 0;
       const backwardOuter = lane.direction < 0 && li === net.roads[r].lanes.length - 1;
       const backwardInner = lane.direction < 0 && li === lanes;
-      net.exit[r][li] = [
+      setLaneRouteConnections(net, g, [
         straight,
         forwardOuter || backwardOuter ? (right ?? straight) : straight,
         forwardInner || backwardInner ? (left ?? straight) : straight,
-      ];
+      ]);
     });
   }
 
@@ -353,16 +356,15 @@ export function leftTurnYieldObstacles(state: IntersectionState, cars: Car[]): N
     if (car.route !== ROUTE_LEFT) return;
     const entry = [...state.entries.ns, ...state.entries.ew].find((e) => e.lane === car.lane);
     if (!entry) return; // not on an approach lane: no yield inside the zone
-    const { road: ri, lane: li } = locate(state.net, car.lane);
-    const dir = state.net.roads[ri].lanes[li].direction;
+    const lane = laneNode(state.net, car.lane);
+    const dir = lane.direction;
     if ((entry.s - car.s) * dir < 0) return; // already past the stop line
     const blocked = (state.opposing.get(car.lane) ?? []).some((lane) =>
       cars.some((other, j) => {
         if (j === i || other.lane !== lane || other.v < YIELD_MIN_SPEED) return false;
-        const ol = locate(state.net, lane);
-        const oRoad = state.net.roads[ol.road];
-        const inZone = oRoad.length <= 2 * state.zoneHalf; // connector or turn arc: inside the zone
-        const dist = oRoad.lanes[ol.lane].direction > 0 ? oRoad.length - other.s : other.s;
+        const otherLane = laneNode(state.net, lane);
+        const inZone = otherLane.length <= 2 * state.zoneHalf; // connector or turn arc: inside the zone
+        const dist = otherLane.direction > 0 ? otherLane.length - other.s : other.s;
         return inZone || dist < Math.max(other.v, 1) * YIELD_ETA; // arriving within YIELD_ETA seconds
       }),
     );

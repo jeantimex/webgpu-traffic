@@ -101,6 +101,15 @@ export function laneRouteConnections(net: Network, global: number): (LaneConnect
   return net.exit[lane.road][lane.lane];
 }
 
+export function setLaneRouteConnections(
+  net: Network,
+  global: number,
+  conns: (LaneConnection | null)[],
+): void {
+  const lane = laneNode(net, global);
+  net.exit[lane.road][lane.lane] = conns;
+}
+
 export function laneHasRouteTable(net: Network, global: number): boolean {
   return laneRouteConnections(net, global).length > 0;
 }

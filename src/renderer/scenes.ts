@@ -579,17 +579,25 @@ export function buildScene3(cfgA: RoadConfig, cfgB: RoadConfig, handed = 1): voi
 function buildRoadStatic(road: Road, palette: Palette, t: Transform): number[] {
   const verts: number[] = [];
   const path = (s: number): PathPoint => applyTransform(road.point(s), t);
+  const lanePath = (lane: number) => (s: number): PathPoint => applyTransform(road.lanePoint(lane, s), t);
   const f = road.config.lanesForward;
   const b = road.config.lanesBackward;
   // A single centered lane (turn arcs): narrow ribbon, no center line, no dashes.
   const single = road.lanes.length === 1 && road.lanes[0].offset === 0;
-  const oMin = single ? -2 : -4 * b;
-  const oMax = single ? 2 : 4 * f;
   const L = road.length;
 
-  // Road ribbon in 1 m patches (smooth on arcs).
-  for (let s = 0; s < L; s += 1) {
-    pushPathPatch(verts, path, s, Math.min(s + 1, L), oMin, oMax, 0.02, palette.asphalt);
+  // Lane ribbons in 1 m patches (smooth on arcs). For current road-offset lanes this
+  // exactly tiles the old full road ribbon while allowing future lanes to own shape.
+  if (single) {
+    for (let s = 0; s < L; s += 1) {
+      pushPathPatch(verts, lanePath(0), s, Math.min(s + 1, L), -2, 2, 0.02, palette.asphalt);
+    }
+  } else {
+    road.lanes.forEach((_, lane) => {
+      for (let s = 0; s < L; s += 1) {
+        pushPathPatch(verts, lanePath(lane), s, Math.min(s + 1, L), -2, 2, 0.02, palette.asphalt);
+      }
+    });
   }
 
   // Solid yellow line separating the directions (the left edge on a one-way road).
