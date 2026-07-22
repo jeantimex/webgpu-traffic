@@ -7,6 +7,7 @@ import { createBufferWithData, resizeCanvasToDisplaySize, type WebGPUState } fro
 import {
   buildScene3,
   buildScene4,
+  buildScene4TurnCurveOverlay,
   PALETTES,
   SCENES,
   pushBox,
@@ -109,6 +110,8 @@ export class Renderer {
   private readonly context: GPUCanvasContext;
   private readonly format: GPUTextureFormat;
   private vertexBuffer: GPUBuffer;
+  private overlayVertexBuffer?: GPUBuffer;
+  private overlayVertexCount = 0;
   private readonly cameraBuffer: GPUBuffer;
   private readonly drawBuffer: GPUBuffer;
   private readonly pipeline: GPURenderPipeline;
@@ -252,6 +255,7 @@ export class Renderer {
   destroy(): void {
     this.stop();
     this.depthTexture?.destroy();
+    this.overlayVertexBuffer?.destroy();
     this.vertexBuffer.destroy();
     this.cameraBuffer.destroy();
     this.drawBuffer.destroy();
@@ -499,6 +503,21 @@ export class Renderer {
         new Float32Array(this.def.buildStatic(palette)),
       );
     }
+    this.overlayVertexBuffer?.destroy();
+    this.overlayVertexBuffer = undefined;
+    this.overlayVertexCount = 0;
+    if (this.scene === 4 && scene4State.state) {
+      const overlayVerts = buildScene4TurnCurveOverlay(this.cars);
+      this.overlayVertexCount = overlayVerts.length / 9;
+      if (this.overlayVertexCount > 0) {
+        this.overlayVertexBuffer = createBufferWithData(
+          this.device,
+          'turn curve overlay vertices',
+          new Float32Array(overlayVerts),
+          GPUBufferUsage.VERTEX,
+        );
+      }
+    }
     this.cars.forEach((car, i) => {
       const gap = this.def.leaderGap(this.cars, i, this.gui.settings.carLength);
       const route = this.scene === 4 ? ` ${['S', 'R', 'L'][car.route]}` : '';
@@ -574,6 +593,11 @@ export class Renderer {
     pass.setVertexBuffer(0, this.vertexBuffer);
     pass.setBindGroup(0, this.bindGroup, [0]);
     pass.draw(this.staticVertexCount, 1, this.staticFirstVertex);
+    if (this.overlayVertexBuffer && this.overlayVertexCount > 0) {
+      pass.setVertexBuffer(0, this.overlayVertexBuffer);
+      pass.draw(this.overlayVertexCount, 1, 0);
+      pass.setVertexBuffer(0, this.vertexBuffer);
+    }
     this.cars.forEach((_, i) => {
       pass.setBindGroup(0, this.bindGroup, [DRAW_STRIDE * (i + 1)]);
       pass.draw(this.carVertexCount, 1, 0);

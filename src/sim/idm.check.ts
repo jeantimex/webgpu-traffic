@@ -526,7 +526,7 @@ console.log('Turn checks passed');
     ['w', 'n', 'right'],
     ['w', 's', 'left'],
   ];
-  for (const lanesEachWay of [1, 2]) {
+  for (const lanesEachWay of [1, 2, 3, 4]) {
     for (const handed of [1, -1]) {
       buildScene4({ approach: 80, lanesEachWay, closed: { n: 'open', e: 'open', s: 'open', w: 'open' } }, handed);
       const def = SCENES[3];
@@ -602,7 +602,7 @@ console.log('Turn checks passed');
 
 // Multi-lane L corner: when straight and one side are closed, every entering lane
 // gets a lane-matched forced turn instead of parking at the zone edge.
-for (const lanesEachWay of [2, 3]) {
+for (const lanesEachWay of [2, 3, 4]) {
   const state = intersectionOf({ n: 'both', e: 'open', s: 'open', w: 'both' }, lanesEachWay);
   const sLanes = Array.from({ length: lanesEachWay }, (_, li) => state.net.laneOffsets[state.roadIndex.s] + li);
   const eLanes = Array.from({ length: lanesEachWay }, (_, i) => {

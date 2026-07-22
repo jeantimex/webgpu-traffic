@@ -102,7 +102,7 @@ export function setupGui(): GuiState {
 
   const intersectionFolder = gui.addFolder('Intersection (scene 4)');
   intersectionFolder.add(state.settings.scene4, 'approach', 40, 150, 10).name('Approach (m)');
-  intersectionFolder.add(state.settings.scene4, 'lanesEachWay', 1, 2, 1).name('Lanes each way');
+  intersectionFolder.add(state.settings.scene4, 'lanesEachWay', 1, 4, 1).name('Lanes each way');
   const wayOptions = { Open: 'open', 'Entry closed': 'in', 'Exit closed': 'out', 'Fully closed': 'both' };
   (['n', 'e', 's', 'w'] as const).forEach((way) => {
     const label = { n: 'top (A)', e: 'right (B)', s: 'bottom (C)', w: 'left (D)' }[way];

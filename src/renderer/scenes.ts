@@ -812,6 +812,27 @@ function buildIntersectionStatic(palette: Palette): number[] {
   return verts;
 }
 
+export function buildScene4TurnCurveOverlay(cars: Car[]): number[] {
+  const state = requireScene4();
+  const turnRoads = new Set(state.turns.map((turn) => state.roadIndex[turn.key]));
+  const active = new Set<number>();
+  cars.forEach((car) => {
+    const road = laneNode(state.net, car.lane).road;
+    if (turnRoads.has(road)) active.add(road);
+  });
+  const verts: number[] = [];
+  const color: Vec3 = [0.05, 0.95, 1.0];
+  active.forEach((roadIndex) => {
+    const road = state.net.roads[roadIndex];
+    const t = scene4State.transforms[roadIndex];
+    const path = (s: number): PathPoint => applyTransform(road.lanePoint(0, s), t);
+    for (let s = 0; s < road.length; s += 1) {
+      pushPathPatch(verts, path, s, Math.min(s + 1, road.length), -0.35, 0.35, 0.08, color);
+    }
+  });
+  return verts;
+}
+
 function intersectionScene(): SceneDef {
   return {
     get c() {
