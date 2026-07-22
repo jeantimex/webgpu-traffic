@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check:sim": "esbuild src/sim/idm.check.ts --bundle --format=esm --outfile=.idm.check.mjs && node .idm.check.mjs && rm .idm.check.mjs",
+    "check": "npm run build && npm run check:sim",
     "preview": "vite preview"
   },
   "devDependencies": {
