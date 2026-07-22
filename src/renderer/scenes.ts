@@ -827,7 +827,7 @@ export function buildScene4TurnCurveOverlay(cars: Car[]): number[] {
     const t = scene4State.transforms[roadIndex];
     const path = (s: number): PathPoint => applyTransform(road.lanePoint(0, s), t);
     for (let s = 0; s < road.length; s += 1) {
-      pushPathPatch(verts, path, s, Math.min(s + 1, road.length), -0.35, 0.35, 0.08, color);
+      pushPathPatch(verts, path, s, Math.min(s + 1, road.length), -0.18, 0.18, 0.08, color);
     }
   });
   return verts;
