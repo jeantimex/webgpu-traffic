@@ -24,6 +24,7 @@ import {
   connectionTargetLane,
   laneConnectionFor,
   laneNode,
+  lanePathPoint,
   lateralNeighbors,
   locate,
   PriorityType,
@@ -117,6 +118,15 @@ const newCar = (s: number, v: number, lane: number, route = 0): Car => ({
 
 const netOf = (...roads: Road[]): Network => buildNetwork(roads, roads.length > 1 ? [[0, 1]] : []);
 
+function assertLanePointMatchesRoad(net: Network, road: Road, lane: number, s: number, msg: string): void {
+  const base = road.point(s);
+  const expectedX = base.x + base.rx * road.lanes[lane].offset;
+  const expectedZ = base.z + base.rz * road.lanes[lane].offset;
+  const p = lanePathPoint(net, lane, s);
+  assert(Math.abs(p.x - expectedX) < 1e-9 && Math.abs(p.z - expectedZ) < 1e-9, `${msg} position`);
+  assert(Math.abs(p.hx - base.hx) < 1e-9 && Math.abs(p.hz - base.hz) < 1e-9, `${msg} heading`);
+}
+
 // Path geometry: unit headings, continuous tangent (arc & S-curve derived by hand).
 for (const shape of ['arc', 'scurve'] as const) {
   const road = new Road({ shape, radius: 50, angle: 60, length: 0, lanesForward: 1, lanesBackward: 0 });
@@ -134,6 +144,32 @@ for (const shape of ['arc', 'scurve'] as const) {
   const scurve = new Road({ shape: 'scurve', radius: 50, angle: 60, length: 0, lanesForward: 1, lanesBackward: 0 });
   const end = scurve.point(scurve.length);
   assert(Math.abs(end.hx - 1) < 1e-9 && Math.abs(end.hz) < 1e-9, 'scurve ends parallel to its start');
+}
+
+// Lane geometry: lane centerline accessors match the existing road centerline + lateral offset convention.
+for (const shape of ['straight', 'arc', 'scurve'] as const) {
+  const road = new Road({
+    shape,
+    length: 120,
+    radius: 50,
+    angle: 60,
+    lanesForward: 2,
+    lanesBackward: 1,
+  });
+  const net = netOf(road);
+  for (const lane of [0, 1, 2]) {
+    for (const s of [0, road.length / 2, road.length]) {
+      assertLanePointMatchesRoad(net, road, lane, s, `${shape} lane ${lane} at s=${s.toFixed(1)}`);
+    }
+  }
+}
+
+// Lane geometry reads the lane's current offset, so custom/internal lanes can be adjusted after construction.
+{
+  const road = new Road({ shape: 'arc', length: 0, radius: 40, angle: 90, lanesForward: 1, lanesBackward: 0 });
+  road.lanes[0].offset = 0;
+  const net = netOf(road);
+  assertLanePointMatchesRoad(net, road, 0, road.length / 2, 'mutated-offset lane geometry');
 }
 
 // Negative angle: the arc turns right (heading angle decreases) and mirrors the left arc.

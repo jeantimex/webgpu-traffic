@@ -33,12 +33,32 @@ export interface Lane {
   offset: number; // signed lateral offset from the path, + = right of forward heading
   leftNeighbor: number | null; // local lane index, null when no legal lane change exists
   rightNeighbor: number | null; // local lane index, null when no legal lane change exists
+  point(s: number): PathPoint; // lane centerline point at arc position s
 }
 
 const LANE_WIDTH = 4;
 
 function makeLane(direction: 1 | -1, offset: number): Lane {
-  return { direction, offset, leftNeighbor: null, rightNeighbor: null };
+  return {
+    direction,
+    offset,
+    leftNeighbor: null,
+    rightNeighbor: null,
+    point: () => {
+      throw new Error('Lane geometry is not initialized.');
+    },
+  };
+}
+
+function offsetPoint(p: PathPoint, offset: number): PathPoint {
+  return {
+    x: p.x + p.rx * offset,
+    z: p.z + p.rz * offset,
+    hx: p.hx,
+    hz: p.hz,
+    rx: p.rx,
+    rz: p.rz,
+  };
 }
 
 function straightPath(length: number): (s: number) => PathPoint {
@@ -140,12 +160,23 @@ export class Road {
     for (let j = 0; j < config.lanesBackward; j++) {
       this.lanes.push(makeLane(-1, -(LANE_WIDTH / 2 + j * LANE_WIDTH) * handed));
     }
+    this.assignLaneGeometry();
     this.assignDefaultLateralNeighbors();
   }
 
   /** Centerline point at arc position s (clamped to the road). */
   point(s: number): PathPoint {
     return this.path(Math.min(Math.max(s, 0), this.length));
+  }
+
+  lanePoint(lane: number, s: number): PathPoint {
+    return this.lanes[lane].point(s);
+  }
+
+  private assignLaneGeometry(): void {
+    this.lanes.forEach((lane) => {
+      lane.point = (s: number): PathPoint => offsetPoint(this.point(s), lane.offset);
+    });
   }
 
   private assignDefaultLateralNeighbors(): void {

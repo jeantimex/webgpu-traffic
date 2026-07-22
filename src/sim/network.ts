@@ -18,7 +18,7 @@ import {
   type Car,
   type IdmParams,
 } from './idm';
-import type { Road } from './road';
+import type { PathPoint, Road } from './road';
 
 /** A signal stop line on one lane: cars on `lane` brake for a standing obstacle at `s`. */
 export interface NetObstacle {
@@ -54,6 +54,7 @@ export interface LaneNode {
   rightNeighbor: number | null; // global lane index
   outgoingConnections: LaneConnection[];
   incomingConnections: LaneConnection[];
+  point(s: number): PathPoint;
 }
 
 /** Route indices into a lane's connection list. */
@@ -105,6 +106,10 @@ export function lateralNeighbors(net: Network, global: number): number[] {
   return [lane.leftNeighbor, lane.rightNeighbor].filter((n): n is number => n !== null);
 }
 
+export function lanePathPoint(net: Network, global: number, s: number): PathPoint {
+  return laneNode(net, global).point(s);
+}
+
 /** A link between two road ends. end: 1 = road end (s = length), 0 = road start (s = 0). */
 export type RoadLink = [a: number, b: number, aEnd?: number, bEnd?: number];
 
@@ -130,6 +135,7 @@ export function rebuildLaneGraph(net: Network): void {
         rightNeighbor: lane.rightNeighbor === null ? null : globalLane(net, ri, lane.rightNeighbor),
         outgoingConnections: uniqueConnections(net.exit[ri][li]),
         incomingConnections: [],
+        point: lane.point,
       };
     });
   });
