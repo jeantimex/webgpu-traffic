@@ -126,23 +126,11 @@ export function rebuildLaneGraph(net: Network): void {
         length: road.length,
         direction: lane.direction,
         offset: lane.offset,
-        leftNeighbor: null,
-        rightNeighbor: null,
+        leftNeighbor: lane.leftNeighbor === null ? null : globalLane(net, ri, lane.leftNeighbor),
+        rightNeighbor: lane.rightNeighbor === null ? null : globalLane(net, ri, lane.rightNeighbor),
         outgoingConnections: uniqueConnections(net.exit[ri][li]),
         incomingConnections: [],
       };
-    });
-  });
-
-  net.roads.forEach((road, ri) => {
-    ([1, -1] as const).forEach((direction) => {
-      const sameDirection = road.lanes
-        .flatMap((lane, li) => (lane.direction === direction ? [globalLane(net, ri, li)] : []))
-        .sort((a, b) => lanes[a].direction * lanes[a].offset - lanes[b].direction * lanes[b].offset);
-      sameDirection.forEach((global, i) => {
-        lanes[global].leftNeighbor = sameDirection[i - 1] ?? null;
-        lanes[global].rightNeighbor = sameDirection[i + 1] ?? null;
-      });
     });
   });
 

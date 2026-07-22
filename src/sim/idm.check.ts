@@ -195,6 +195,20 @@ for (const shape of ['arc', 'scurve'] as const) {
   assert(maxV > 25, `fast car was not stuck (max v=${maxV.toFixed(2)})`);
 }
 
+// Explicit lateral graph: removing a neighbor link blocks lane changes even when an empty lane exists.
+{
+  const road = new Road({ shape: 'straight', length: 400, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 });
+  road.lanes[0].rightNeighbor = null;
+  road.lanes[1].leftNeighbor = null;
+  const net = netOf(road);
+  assert(lateralNeighbors(net, 0).length === 0, 'lane graph honors explicit missing lateral neighbor');
+  const race = [newCar(0, 30, 0), newCar(150, 12, 0)];
+  for (let step = 0; step < 12 * 60; step++) {
+    stepNetwork(net, race, [fast, slow], CAR_LENGTH, 1 / 60);
+  }
+  assert(race[0].lane === 0, 'car cannot change lanes without an explicit lateral neighbor');
+}
+
 // Two-way: opposing traffic does not interact.
 {
   const p20: IdmParams = { ...fast, v0: 20 };

@@ -31,9 +31,15 @@ export interface RoadConfig {
 export interface Lane {
   direction: 1 | -1;
   offset: number; // signed lateral offset from the path, + = right of forward heading
+  leftNeighbor: number | null; // local lane index, null when no legal lane change exists
+  rightNeighbor: number | null; // local lane index, null when no legal lane change exists
 }
 
 const LANE_WIDTH = 4;
+
+function makeLane(direction: 1 | -1, offset: number): Lane {
+  return { direction, offset, leftNeighbor: null, rightNeighbor: null };
+}
 
 function straightPath(length: number): (s: number) => PathPoint {
   return (s) => ({ x: s - length / 2, z: 0, hx: 1, hz: 0, rx: 0, rz: 1 });
@@ -129,15 +135,28 @@ export class Road {
         break;
     }
     for (let i = 0; i < config.lanesForward; i++) {
-      this.lanes.push({ direction: 1, offset: (LANE_WIDTH / 2 + i * LANE_WIDTH) * handed });
+      this.lanes.push(makeLane(1, (LANE_WIDTH / 2 + i * LANE_WIDTH) * handed));
     }
     for (let j = 0; j < config.lanesBackward; j++) {
-      this.lanes.push({ direction: -1, offset: -(LANE_WIDTH / 2 + j * LANE_WIDTH) * handed });
+      this.lanes.push(makeLane(-1, -(LANE_WIDTH / 2 + j * LANE_WIDTH) * handed));
     }
+    this.assignDefaultLateralNeighbors();
   }
 
   /** Centerline point at arc position s (clamped to the road). */
   point(s: number): PathPoint {
     return this.path(Math.min(Math.max(s, 0), this.length));
+  }
+
+  private assignDefaultLateralNeighbors(): void {
+    ([1, -1] as const).forEach((direction) => {
+      const sameDirection = this.lanes
+        .flatMap((lane, i) => (lane.direction === direction ? [i] : []))
+        .sort((a, b) => direction * this.lanes[a].offset - direction * this.lanes[b].offset);
+      sameDirection.forEach((lane, i) => {
+        this.lanes[lane].leftNeighbor = sameDirection[i - 1] ?? null;
+        this.lanes[lane].rightNeighbor = sameDirection[i + 1] ?? null;
+      });
+    });
   }
 }
