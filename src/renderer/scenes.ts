@@ -8,7 +8,8 @@ import {
 } from '../sim/idm';
 import {
   buildNetwork,
-  locate,
+  laneNode,
+  lanePathPoint,
   networkGapAhead,
   networkSpawnSlot,
   stepNetwork,
@@ -615,25 +616,25 @@ function buildRoadStatic(road: Road, palette: Palette, t: Transform): number[] {
 }
 
 function networkCarPose(net: Network, transforms: Transform[], car: Car, handed: number): Pose {
-  const from = locate(net, Math.round(car.laneFrom));
-  const to = locate(net, car.lane);
-  const road = net.roads[to.road];
-  const fromLane = road.lanes[from.lane]; // from/to are the same road during a slide
-  const toLane = road.lanes[to.lane];
+  const fromGlobal = Math.round(car.laneFrom);
+  const to = laneNode(net, car.lane);
+  const from = laneNode(net, fromGlobal);
   const span = car.lane - car.laneFrom;
   const t = span === 0 ? 1 : (car.lateral - car.laneFrom) / span;
-  const offset = fromLane.offset + (toLane.offset - fromLane.offset) * t;
-  const offsetVel = span === 0 ? 0 : ((toLane.offset - fromLane.offset) * car.lateralVel) / span;
-  const dir = toLane.direction;
-  const p = applyTransform(road.point(car.s), transforms[to.road]);
+  const offsetVel = span === 0 ? 0 : ((to.offset - from.offset) * car.lateralVel) / span;
+  const fromPoint = applyTransform(lanePathPoint(net, fromGlobal, car.s), transforms[from.road]);
+  const toPoint = applyTransform(lanePathPoint(net, car.lane, car.s), transforms[to.road]);
+  const x = fromPoint.x + (toPoint.x - fromPoint.x) * t;
+  const z = fromPoint.z + (toPoint.z - fromPoint.z) * t;
+  const dir = to.direction;
   // Nose along the true velocity: travel direction plus the lateral slide (the body's
   // local +z is the right normal; handedness flips which side the lanes sit on).
   const yaw = Math.atan2(-offsetVel * dir * handed, Math.max(car.v, 1));
   return {
-    x: p.x + p.rx * offset,
+    x,
     y: 0.02,
-    z: p.z + p.rz * offset,
-    angle: Math.atan2(-p.hz, p.hx) + (dir < 0 ? Math.PI : 0) + yaw,
+    z,
+    angle: Math.atan2(-toPoint.hz, toPoint.hx) + (dir < 0 ? Math.PI : 0) + yaw,
     pitch: 0,
   };
 }

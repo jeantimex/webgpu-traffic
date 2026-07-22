@@ -4,8 +4,10 @@
  */
 import { idmAcceleration, stepRing, type Car, type IdmParams } from './idm';
 import {
+  buildScene3,
   buildScene4,
   SCENES,
+  scene3State,
   scene4State,
 } from '../renderer/scenes';
 import {
@@ -127,6 +129,18 @@ function assertLanePointMatchesRoad(net: Network, road: Road, lane: number, s: n
   assert(Math.abs(p.hx - base.hx) < 1e-9 && Math.abs(p.hz - base.hz) < 1e-9, `${msg} heading`);
 }
 
+function transformedLanePoint(net: Network, global: number, s: number): { x: number; z: number; hx: number; hz: number } {
+  const lane = laneNode(net, global);
+  const p = lanePathPoint(net, global, s);
+  const t = scene3State.transforms[lane.road];
+  return {
+    x: p.x * t.cos + p.z * t.sin + t.tx,
+    z: -p.x * t.sin + p.z * t.cos + t.tz,
+    hx: p.hx * t.cos + p.hz * t.sin,
+    hz: -p.hx * t.sin + p.hz * t.cos,
+  };
+}
+
 // Path geometry: unit headings, continuous tangent (arc & S-curve derived by hand).
 for (const shape of ['arc', 'scurve'] as const) {
   const road = new Road({ shape, radius: 50, angle: 60, length: 0, lanesForward: 1, lanesBackward: 0 });
@@ -170,6 +184,23 @@ for (const shape of ['straight', 'arc', 'scurve'] as const) {
   road.lanes[0].offset = 0;
   const net = netOf(road);
   assertLanePointMatchesRoad(net, road, 0, road.length / 2, 'mutated-offset lane geometry');
+}
+
+// Network scene poses consume lane geometry for settled cars.
+{
+  buildScene3(
+    { shape: 'straight', length: 120, radius: 50, angle: 90, lanesForward: 2, lanesBackward: 0 },
+    { shape: 'arc', length: 0, radius: 50, angle: 60, lanesForward: 2, lanesBackward: 0 },
+  );
+  const net = scene3State.net!;
+  const lane = 1;
+  const s = 30;
+  const car = newCar(s, 12, lane);
+  const pose = SCENES[2].carPose(car);
+  const expected = transformedLanePoint(net, lane, s);
+  assert(Math.abs(pose.x - expected.x) < 1e-9 && Math.abs(pose.z - expected.z) < 1e-9, 'scene 3 pose uses lane geometry');
+  assert(Math.abs(Math.cos(pose.angle) - expected.hx) < 1e-9, 'scene 3 pose heading x uses lane geometry');
+  assert(Math.abs(-Math.sin(pose.angle) - expected.hz) < 1e-9, 'scene 3 pose heading z uses lane geometry');
 }
 
 // Negative angle: the arc turns right (heading angle decreases) and mirrors the left arc.
